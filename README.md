@@ -8,7 +8,7 @@ Please see the following example.
 * Assumes "chainer" installed!! for installation, see https://chainer.org
 
 ## Data 
-* Sample data from WMT15 page http://www.statmt.org/wmt16/translation-task.html
+* Sample data from WMT16 page http://www.statmt.org/wmt16/translation-task.html
 
 ## Preprocess (vocab file) example
 

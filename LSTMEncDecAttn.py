@@ -4,7 +4,7 @@
 
 '''
 # This code is basically a supplementary material of the book
-" "深層学習による自然言語処理 (機械学習プロフェッショナルシリーズ)
+# "深層学習による自然言語処理 (機械学習プロフェッショナルシリーズ)
 # ISBN-10: 4061529242".
 # This is the reason why the comments in this code were written in Japanese,
 # and written in single file.
@@ -18,7 +18,7 @@
 #   https://pypi.python.org/pypi/Bottleneck
 #
 # * サンプルの利用法
-# サンプルデータはWMT15のページから入手
+# サンプルデータはWMT16のページから入手
 # http://www.statmt.org/wmt16/translation-task.html
 # vocabファイルの準備例
 for f in sample_data/newstest2012-4p.{en,de} ;do \
