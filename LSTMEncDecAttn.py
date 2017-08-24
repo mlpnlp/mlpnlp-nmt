@@ -3,21 +3,14 @@
 
 
 '''
-# J.S
-# 基本方針:コメントは日本語で(日本語の書籍の添付物扱いなので．．．)
-#        内容理解目的？なので可読性をなるべく高くする．
-#        とはいえ，計算効率もなるべく担保
-#        ファイルは1ファイルで完結させる
-#        seq2seq-attn(またはopenNMT)をベースにして作成
-#        モデルの組み方は色々考えられるが今回はシンプルに作ることが目的
-#        形式が違う部分は適宜修正し，なるべく記述の形式を合わせる
-#        バグがまだ残っているかもしれないので，怪しかったら報告お願いします．
-# python2.7 と 3.5 で動作確認 どちらでも動くはず
-# chainer v1.24 と v2.0 で動作確認 こちらもどちらでも動くはず
-# GPUが無い環境では以下でGPU=-1として実行
-# bottleneckのインストールを推奨
-# https://pypi.python.org/pypi/Bottleneck
-# サンプルの利用法
+# seq2seq-attn(またはopenNMT)をベースにして作成
+# 動作確認
+# * python2.7 と 3.5, 3.6
+# * chainer v1.24 と v2.0
+# * bottleneckのインストールを推奨
+#   https://pypi.python.org/pypi/Bottleneck
+# 
+# * サンプルの利用法
 # サンプルデータはWMT15のページから入手
 # http://www.statmt.org/wmt16/translation-task.html
 # vocabファイルの準備
@@ -28,7 +21,7 @@ for f in sample_data/newstest2012-4p.{en,de} ;do \
     perl -pe 's/^\s+//; ($a1,$a2)=split;
        if( $a1 >= 3 ){ $_="$a2\t$a1\n" }else{ $_="" } ' > ${f}.vocab_t3_tab ;\
 done
-# 学習
+# 学習 (GPUが無い環境では以下でGPU=-1として実行)
 SLAN=de; TLAN=en; GPU=0;  EP=13 ;  \
 MODEL=sample_models/filename_of_models.model ;\
 python3 -u ./LSTMEncDecAttn.py -V2 \
@@ -98,7 +91,7 @@ import chainer.serializers as chaSerial
 from chainer import cuda
 
 
-# gradientのnormなどを効率的に取得するために元のコードを微修正
+# gradientのnormなどを効率的に取得するための処理
 # logの出力で使わないなら，本来なくてもいい部分
 class Chainer_GradientClipping_rmk_v1(chainer.optimizer.GradientClipping):
     name = 'GradientClipping'
