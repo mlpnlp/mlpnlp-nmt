@@ -3,17 +3,24 @@
 
 
 '''
+# This code is basically a supplementary material of the book
+" "深層学習による自然言語処理 (機械学習プロフェッショナルシリーズ)
+# ISBN-10: 4061529242".
+# This is the reason why the comments in this code were written in Japanese,
+# and written in single file.
+
+
 # seq2seq-attn(またはopenNMT)をベースにして作成
 # 動作確認
 # * python2.7 と 3.5, 3.6
 # * chainer v1.24 と v2.0
 # * bottleneckのインストールを推奨
 #   https://pypi.python.org/pypi/Bottleneck
-# 
+#
 # * サンプルの利用法
 # サンプルデータはWMT15のページから入手
 # http://www.statmt.org/wmt16/translation-task.html
-# vocabファイルの準備
+# vocabファイルの準備例
 for f in sample_data/newstest2012-4p.{en,de} ;do \
     echo ${f} ; \
     cat ${f} | sed '/^$/d' | perl -pe 's/^\s+//; s/\s+\n$/\n/; s/ +/\n/g'  | \
@@ -23,8 +30,8 @@ for f in sample_data/newstest2012-4p.{en,de} ;do \
 done
 # 学習 (GPUが無い環境では以下でGPU=-1として実行)
 SLAN=de; TLAN=en; GPU=0;  EP=13 ;  \
-MODEL=sample_models/filename_of_models.model ;\
-python3 -u ./LSTMEncDecAttn.py -V2 \
+MODEL=filename_of_sample_model.model ; \
+python -u ./LSTMEncDecAttn.py -V2 \
    -T                      train \
    --gpu-enc               ${GPU} \
    --gpu-dec               ${GPU} \
@@ -56,9 +63,9 @@ python3 -u ./LSTMEncDecAttn.py -V2 \
 
 # 評価
 SLAN=de; GPU=0;  EP=13 ; BEAM=5 ;  \
-MODEL=sample_models/filename_of_models.model ;\
-python3 -u ./LSTMEncDecAttn.py \
-   -t                  test \
+MODEL=filename_of_sample_model.model ; \
+python -u ./LSTMEncDecAttn.py \
+   -T                  test \
    --gpu-enc           ${GPU} \
    --gpu-dec           ${GPU} \
    --enc-data-file     sample_data/newstest2015.h101-200.${SLAN} \

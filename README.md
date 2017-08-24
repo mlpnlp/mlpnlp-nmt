@@ -4,10 +4,13 @@ This is a sample code of "LSTM encoder-decoder with attention mechanism" mainly 
 # How to use
 Please see the following example.
 
+## Requirement
+* Assumes "chainer" installed!! for installation, see https://chainer.org
+
 ## Data 
 * Sample data from WMT15 page http://www.statmt.org/wmt16/translation-task.html
 
-## Preprocess (vocab file)
+## Preprocess (vocab file) example
 
 ```bash
 for f in sample_data/newstest2012-4p.{en,de} ;do \
@@ -24,8 +27,8 @@ Note that please run with ``GPU=-1`` option for no GPU environment
 
 ```bash
 SLAN=de; TLAN=en; GPU=0;  EP=13 ;  \
-MODEL=sample_models/filename_of_models.model ;\
-python3 -u ./LSTMEncDecAttn.py -V2 \
+MODEL=filename_of_sample_model.model ; \
+python -u ./LSTMEncDecAttn.py -V2 \
    -T                      train \
    --gpu-enc               ${GPU} \
    --gpu-dec               ${GPU} \
@@ -59,9 +62,9 @@ python3 -u ./LSTMEncDecAttn.py -V2 \
 
 ```bash
 SLAN=de; GPU=0;  EP=13 ; BEAM=5 ;  \
-MODEL=sample_models/filename_of_models.model ;\
-python3 -u ./LSTMEncDecAttn.py \
-   -t                  test \
+MODEL=filename_of_sample_model.model ; \
+python -u ./LSTMEncDecAttn.py \
+   -T                  test \
    --gpu-enc           ${GPU} \
    --gpu-dec           ${GPU} \
    --enc-data-file     sample_data/newstest2015.h101-200.${SLAN} \
