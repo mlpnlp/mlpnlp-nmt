@@ -8,6 +8,7 @@ Please see the following example.
 * Sample data from WMT15 page http://www.statmt.org/wmt16/translation-task.html
 
 ## Preprocess (vocab file)
+
 ```bash
 for f in sample_data/newstest2012-4p.{en,de} ;do \
     echo ${f} ; \
@@ -17,8 +18,10 @@ for f in sample_data/newstest2012-4p.{en,de} ;do \
        if( $a1 >= 3 ){ $_="$a2\t$a1\n" }else{ $_="" } ' > ${f}.vocab_t3_tab ;\
 done
 ```
+
 ## Training 
 Note that please run with ``GPU=-1`` option for no GPU environment
+
 ```bash
 SLAN=de; TLAN=en; GPU=0;  EP=13 ;  \
 MODEL=sample_models/filename_of_models.model ;\
@@ -53,6 +56,7 @@ python3 -u ./LSTMEncDecAttn.py -V2 \
 ```
 
 ## Evaluation
+
 ```bash
 SLAN=de; GPU=0;  EP=13 ; BEAM=5 ;  \
 MODEL=sample_models/filename_of_models.model ;\
