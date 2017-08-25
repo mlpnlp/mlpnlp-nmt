@@ -143,6 +143,7 @@ class NLayerLSTM(chainer.ChainList):
 
     # 全ての層に対して一回だけLSTMを回す
     def processOneStepForward(self, input_states, args, dropout_rate):
+        hout = None
         for c, layer in enumerate(self):
             if c > 0:  # 一層目(embedding)の入力に対してはdropoutしない
                 if args.chainer_version_check[0] == 2:
@@ -1445,7 +1446,7 @@ def decodeByBeamFast(EncDecAtt, encSent, cMBSize, max_length, beam_size, args):
 
 
 def rerankingByLengthNormalizedLoss(beam, wposi):
-    beam.sort(key=lambda b: b[0]/len(b[wposi]))
+    beam.sort(key=lambda b: b[0] / len(b[wposi]))
     return beam
 
 
@@ -1499,7 +1500,7 @@ def ttest_model(args):
 
         for i in six.moves.range(outloop):
             outputList = outputBeam[i][wposi]
-            score = outputBeam[i][0]
+            # score = outputBeam[i][0]
             if outputList[-1] != '</s>':
                 outputList.append('</s>')
             # if args.outputAllBeam > 0:
@@ -1517,8 +1518,9 @@ def ttest_model(args):
                           time.time() - begin))
     sys.stderr.write('\rDONE: %5d | Time: %10.4f\n' %
                      (counter, time.time() - begin))
-#######################################
 
+
+#######################################
 # ## main関数
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
