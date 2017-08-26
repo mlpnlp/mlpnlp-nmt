@@ -10,7 +10,7 @@ Please see the following example.
 ## Data 
 * Sample data from WMT16 page http://www.statmt.org/wmt16/translation-task.html
 
-## Preprocess (vocab file) example
+## Preprocess (vocab file) examples
 
 ```bash
 for f in sample_data/newstest2012-4p.{en,de} ;do \
@@ -25,7 +25,7 @@ done
 or
 
 ```bash
-T=10; for f in sample_data/newstest2012-4p.{en,de} ;do \
+T=3; for f in sample_data/newstest2012-4p.{en,de} ;do \
     echo ${f} ; \
     cat ${f} | python count_freq.py ${T} > ${f}.vocab_t${T}_tab ; \
 done
