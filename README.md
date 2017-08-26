@@ -22,6 +22,15 @@ for f in sample_data/newstest2012-4p.{en,de} ;do \
 done
 ```
 
+or
+
+```bash
+T=10; for f in sample_data/newstest2012-4p.{en,de} ;do \
+    echo ${f} ; \
+    cat ${f} | python count_freq.py ${T} > ${f}.vocab_t${T}_tab ; \
+done
+```
+
 ## Training 
 Note that please run with ``GPU=-1`` option for no GPU environment
 
