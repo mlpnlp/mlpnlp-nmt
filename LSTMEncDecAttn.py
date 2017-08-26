@@ -88,7 +88,8 @@ import time
 import random
 import math
 import six
-import codecs
+import io
+# import codecs
 
 import chainer
 import chainer.functions as chaFunc
@@ -811,17 +812,20 @@ class PrepareData:
         d.setdefault('</s>', len(d))  # 2番目 固定
         sys.stdout.write('# Vocab: add </s>  | id={}\n'.format(d['</s>']))
 
-        for line in codecs.open(vocabFile, encoding='utf-8'):
-            line = line.strip()
-            word, freq = line.split('\t')  # 基本的にtab区切りを想定
-            # word, freq = line.split(' ')  # スペース区切りはこちらに変更
-            if word == "<unk>":
-                continue
-            elif word == "<s>":
-                continue
-            elif word == "</s>":
-                continue
-            d.setdefault(word, len(d))
+        # TODO: codecsでないとエラーが出る環境がある？ 要調査 不要ならioにしたい
+        with io.open(vocabFile, encoding='utf-8') as f:
+            # with codecs.open(vocabFile, encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                word, freq = line.split('\t')  # 基本的にtab区切りを想定
+                # word, freq = line.split(' ')  # スペース区切りはこちらに変更
+                if word == "<unk>":
+                    continue
+                elif word == "<s>":
+                    continue
+                elif word == "</s>":
+                    continue
+                d.setdefault(word, len(d))
         return d
 
     def sentence2index(self, sentence, word2indexDict, input_side=False):
@@ -844,20 +848,22 @@ class PrepareData:
         sampleNum = 0
         maxLen = 0
         # ここで全てのデータを読み込む
-        for sntNum, snt in enumerate(
-                codecs.open(fileName, encoding='utf-8')):
-            snt = snt.strip()
-            indexList = self.sentence2index(
-                snt, word2indexDict, input_side=input_side)
-            sampleNum += len(indexList)
-            if input_side:
-                # input側 ここで長さ毎でまとめたリストを作成する
-                # 値は文番号と文そのもののペア
-                d[len(indexList)].append((sntNum, indexList))
-            else:
-                d[sntNum] = indexList  # decoder側 文の番号をキーとしたハッシュ
-            sentenceNum += 1
-            maxLen = max(maxLen, len(indexList))
+        # TODO: codecsでないとエラーが出る環境がある？ 要調査 不要ならioにしたい
+        with io.open(fileName, encoding='utf-8') as f:
+            # with codecs.open(fileName, encoding='utf-8') as f:
+            for sntNum, snt in enumerate(f):  # ここで全てのデータを読み込む
+                snt = snt.strip()
+                indexList = self.sentence2index(
+                    snt, word2indexDict, input_side=input_side)
+                sampleNum += len(indexList)
+                if input_side:
+                    # input側 ここで長さ毎でまとめたリストを作成する
+                    # 値は文番号と文そのもののペア
+                    d[len(indexList)].append((sntNum, indexList))
+                else:
+                    d[sntNum] = indexList  # decoder側 文の番号をキーとしたハッシュ
+                sentenceNum += 1
+                maxLen = max(maxLen, len(indexList))
         sys.stdout.write('# data sent: %10d  sample: %10d maxlen: %10d\n' % (
             sentenceNum, sampleNum, maxLen))
         return d
@@ -1446,7 +1452,7 @@ def decodeByBeamFast(EncDecAtt, encSent, cMBSize, max_length, beam_size, args):
 
 
 def rerankingByLengthNormalizedLoss(beam, wposi):
-    beam.sort(key=lambda b: b[0] / len(b[wposi]))
+    beam.sort(key=lambda b: b[0] / (len(b[wposi])-1))
     return beam
 
 
@@ -1477,45 +1483,48 @@ def ttest_model(args):
 
     begin = time.time()
     counter = 0
-    for sentence in codecs.open(args.encDataFile, encoding='utf-8'):
-        sentence = sentence.strip()  # stripを忘れずに．．．
-        # ここでは，入力された順番で一文ずつ処理する方式のみをサポート
-        sourceSentence = prepD.sentence2index(
-            sentence, EncDecAtt.encoderVocab, input_side=True)
-        sourceSentence = np.transpose(
-            np.reshape(np.array(sourceSentence, dtype=np.int32),
-                       (1, len(sourceSentence))))
-        # 1文ずつ処理するので，test時は基本必ずminibatch=1になる
-        cMBSize = len(sourceSentence[0])
-        outputBeam = decodeByBeamFast(EncDecAtt, sourceSentence, cMBSize,
-                                      decMaxLen, args.beam_size, args)
-        wposi = 4
-        outloop = 1
-        # if args.outputAllBeam > 0:
-        #    outloop = args.beam_size
-
-        # 長さに基づく正規化 このオプションを使うことを推奨
-        if args.length_normalized:
-            outputBeam = rerankingByLengthNormalizedLoss(outputBeam, wposi)
-
-        for i in six.moves.range(outloop):
-            outputList = outputBeam[i][wposi]
-            # score = outputBeam[i][0]
-            if outputList[-1] != '</s>':
-                outputList.append('</s>')
+    # TODO: codecsでないとエラーが出る環境がある？ 要調査 不要ならioにしたい
+    with io.open(args.encDataFile, encoding='utf-8') as f:
+        # with codecs.open(args.encDataFile, encoding='utf-8') as f:
+        for sentence in f:
+            sentence = sentence.strip()  # stripを忘れずに．．．
+            # ここでは，入力された順番で一文ずつ処理する方式のみをサポート
+            sourceSentence = prepD.sentence2index(
+                sentence, EncDecAtt.encoderVocab, input_side=True)
+            sourceSentence = np.transpose(
+                np.reshape(np.array(sourceSentence, dtype=np.int32),
+                           (1, len(sourceSentence))))
+            # 1文ずつ処理するので，test時は基本必ずminibatch=1になる
+            cMBSize = len(sourceSentence[0])
+            outputBeam = decodeByBeamFast(EncDecAtt, sourceSentence, cMBSize,
+                                          decMaxLen, args.beam_size, args)
+            wposi = 4
+            outloop = 1
             # if args.outputAllBeam > 0:
-            # sys.stdout.write("# {} {} {}\n".format(i, score,
-            # len(outputList)))
+            #    outloop = args.beam_size
 
-            sys.stdout.write('{}\n'.format(
-                ' '.join(outputList[1:len(outputList) - 1])))
-            # charlenList = sum([ len(z)+1 for z in
-            # 文末の空白はカウントしないので-1
-            # outputList[1:len(outputList) - 1] ])-1
-        counter += 1
-        sys.stderr.write('\rSent.Num: %5d %s  | words=%d | Time: %10.4f ' %
-                         (counter, outputList, len(outputList),
-                          time.time() - begin))
+            # 長さに基づく正規化 このオプションを使うことを推奨
+            if args.length_normalized:
+                outputBeam = rerankingByLengthNormalizedLoss(outputBeam, wposi)
+
+            for i in six.moves.range(outloop):
+                outputList = outputBeam[i][wposi]
+                # score = outputBeam[i][0]
+                if outputList[-1] != '</s>':
+                    outputList.append('</s>')
+                # if args.outputAllBeam > 0:
+                # sys.stdout.write("# {} {} {}\n".format(i, score,
+                # len(outputList)))
+
+                sys.stdout.write('{}\n'.format(
+                    ' '.join(outputList[1:len(outputList) - 1])))
+                # charlenList = sum([ len(z)+1 for z in
+                # 文末の空白はカウントしないので-1
+                # outputList[1:len(outputList) - 1] ])-1
+            counter += 1
+            sys.stderr.write('\rSent.Num: %5d %s  | words=%d | Time: %10.4f ' %
+                             (counter, outputList, len(outputList),
+                              time.time() - begin))
     sys.stderr.write('\rDONE: %5d | Time: %10.4f\n' %
                      (counter, time.time() - begin))
 
