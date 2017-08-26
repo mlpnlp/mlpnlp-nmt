@@ -621,11 +621,11 @@ class EncoderDecoderAttention:
         else:
             assert 0, "ERROR"
         xp = cuda.get_array_module(encInfo.lstmVars[0].data)
-        prevOutIn = chainer.Variable(
+        finalHS = chainer.Variable(
             xp.zeros(
                 encInfo.lstmVars[0].data.shape,
                 dtype=xp.float32))  # 最初のinput_feedは0で初期化
-        return aList, prevOutIn
+        return aList, finalHS
 
     ############################
     def trainOneMiniBatch(self, train_mode, decSent, encInfo,
@@ -633,7 +633,7 @@ class EncoderDecoderAttention:
         if args.gpu_enc != args.gpu_dec:  # encとdecが別GPUの場合
             chainer.cuda.get_device(args.gpu_dec).use()
         cMBSize = encInfo.cMBSize
-        aList, prevOutIn = self.prepareDecoder(encInfo)
+        aList, finalHS = self.prepareDecoder(encInfo)
 
         xp = cuda.get_array_module(encInfo.lstmVars[0].data)
         total_loss = chainer.Variable(xp.zeros((), dtype=xp.float32))  # 初期化
@@ -655,15 +655,21 @@ class EncoderDecoderAttention:
         for index in six.moves.range(decoder_proc):  # decoder_len -1
             if index == 0:
                 t_lstm_states = encInfo.lstmVars
-                t_prevOutIn = prevOutIn
+                t_finalHS = finalHS
             else:
                 t_lstm_states = lstm_states_list_copy[index - 1]
-                t_prevOutIn = h4_list_copy[index - 1]
-            lstm_states, prevOutIn = self.processOneDecInput(
-                decEmbListCopy[index], encInfo.attnList, aList, t_lstm_states,
-                t_prevOutIn, encInfo.encLen, cMBSize, args, dropout_rate)
-            h4_list_copy[index] = prevOutIn
+                t_finalHS = h4_list_copy[index - 1]
+            # decoder LSTMを一回ぶん計算
+            hOut, lstm_states = self.processDecLSTMOneStep(
+                decEmbListCopy[index], t_lstm_states,
+                t_finalHS, args, dropout_rate)
+            # lstm_statesをキャッシュ
             lstm_states_list_copy[index] = lstm_states
+            # attentionありの場合 contextベクトルを計算
+            finalHS = self.calcAttention(hOut, encInfo.attnList, aList,
+                                         encInfo.encLen, cMBSize, args)
+            # finalHSをキャッシュ
+            h4_list_copy[index] = finalHS
         #######################################################################
         # 3, output(softmax)層の計算
         for index in reversed(six.moves.range(decoder_proc)):
@@ -701,9 +707,33 @@ class EncoderDecoderAttention:
 
         return total_loss_val, (correct, incorrect, decoder_proc, proc)
 
+    # decoder LSTMの計算
+    def processDecLSTMOneStep(self, decInputEmb, lstm_states_in,
+                              finalHS, args, dropout_rate):
+        # 1, RNN層を隠れ層の値をセット
+        # （beam searchへの対応のため毎回必ずセットする）
+        self.model.decLSTM.setAllLSTMStates(lstm_states_in)
+        # 2, 単語埋め込みの取得とinput feedの処理
+        if self.flag_dec_ifeed == 0:  # inputfeedを使わない
+            wenbed = decInputEmb
+        elif self.flag_dec_ifeed == 1:  # inputfeedを使う (default)
+            wenbed = chaFunc.concat((finalHS, decInputEmb))
+        # elif self.flag_dec_ifeed == 2: # decInputEmbを使わない (debug用)
+        #    wenbed = finalHS
+        else:
+            assert 0, "ERROR"
+        # 3， N層分のRNN層を一括で計算
+        h1 = self.model.decLSTM.processOneStepForward(
+            wenbed, args, dropout_rate)
+        # 4, 次の時刻の計算のためにLSTMの隠れ層を取得
+        lstm_states_out = self.model.decLSTM.getAllLSTMStates()
+        return h1, lstm_states_out
+
     # attentionの計算
-    def calcAttention(self, h1, hList, aList, encLen, cMBSize,
-                      args, dropout_rate):
+    def calcAttention(self, h1, hList, aList, encLen, cMBSize, args):
+        # attention使わないなら入力された最終隠れ層h1を返す
+        if self.attn_mode == 0:
+            return h1
         # 1, attention計算のための準備
         target1 = self.model.attnIn_L1(h1)  # まず一回変換
         # (cMBSize, self.hDim) => (cMBSize, 1, self.hDim)
@@ -749,41 +779,13 @@ class EncoderDecoderAttention:
         # 重み付き和を計算 (cMBSize, encLen, hDim)
         #     => (cMBSize, hDim)  # axis=1 がなくなる
         # context = chaFunc.sum(aList * cAttn3, axis=1)
-        return context
-
-    def processOneDecInput(self, decInputEmb, hList, aList, lstm_states_in,
-                           prevOutIn, encLen, cMBSize, args, dropout_rate):
-        # 1, RNN層を隠れ層の値をセット
-        # （beam searchへの対応のため毎回必ずセットする）
-        self.model.decLSTM.setAllLSTMStates(lstm_states_in)
-        # 2, 単語埋め込みの取得とinput feedの処理
-        if self.flag_dec_ifeed == 0:  # inputfeedを使わない
-            wenbed = decInputEmb
-        elif self.flag_dec_ifeed == 1:  # inputfeedを使う (default)
-            wenbed = chaFunc.concat((prevOutIn, decInputEmb))
-        # elif self.flag_dec_ifeed == 2: # decInputEmbを使わない (debug用)
-        #    wenbed = prevOutIn
-        else:
-            assert 0, "ERROR"
-        # 3， N層分のRNN層を一括で計算
-        h1 = self.model.decLSTM.processOneStepForward(
-            wenbed, args, dropout_rate)
-        # 4, 次の時刻の計算のためにLSTMの隠れ層を取得
-        lstm_states_out = self.model.decLSTM.getAllLSTMStates()
-        # 5, attention計算
-        # attentionなしならLSTMの最終隠れ層の値を返しておしまい
-        if self.attn_mode == 0:
-            return lstm_states_out, h1
-        # attentionありの場合 contextベクトルを計算
-        context = self.calcAttention(h1, hList, aList, encLen, cMBSize,
-                                     args, dropout_rate)
         # 6, attention時の最終隠れ層の計算
         c1 = chaFunc.concat((h1, context))
         c2 = self.model.attnOut_L2(c1)
         finalH = chaFunc.tanh(c2)
         # finalH = chaFunc.tanh(self.model.attnOut_L2(
         #    chaFunc.concat((h1, context))))
-        return lstm_states_out, finalH
+        return finalH  # context
 
     # 出力層の計算
     def generateWord(self, h4, encLen, cMBSize, args, dropout_rate):
@@ -1045,6 +1047,8 @@ def train_model_sub(train_mode, epoch, tData, EncDecAtt, optimizer,
                         sys.stdout.write('\r')
                     sys.stdout.write('%s\n' % (msgA))
                     prnCnt = 0
+                elif args.verbose > 2:
+                    sys.stderr.write('\n%s' % (msgA))
                 elif args.verbose > 1:
                     sys.stderr.write('\r%s' % (msgA))
             ###################
@@ -1301,7 +1305,7 @@ def decodeByBeamFast(EncDecAtt, encSent, cMBSize, max_length, beam_size, args):
     if args.gpu_enc != args.gpu_dec:  # encとdecが別GPUの場合
         chainer.cuda.get_device(args.gpu_dec).use()
     encLen = encInfo.encLen
-    aList, prevOutIn = EncDecAtt.prepareDecoder(encInfo)
+    aList, finalHS = EncDecAtt.prepareDecoder(encInfo)
 
     idx_bos = EncDecAtt.decoderVocab['<s>']
     idx_eos = EncDecAtt.decoderVocab['</s>']
@@ -1311,7 +1315,7 @@ def decodeByBeamFast(EncDecAtt, encSent, cMBSize, max_length, beam_size, args):
         WFilter = xp.zeros((1, EncDecAtt.decVocabSize), dtype=xp.float32)
     else:
         WFilter = None
-    beam = [(0, [idx_bos], idx_bos, encInfo.lstmVars, prevOutIn, WFilter)]
+    beam = [(0, [idx_bos], idx_bos, encInfo.lstmVars, finalHS, WFilter)]
     dummy_b = (1.0e+100, [idx_bos], idx_bos, None, None, WFilter)
 
     for i in six.moves.range(max_length + 1):  # for </s>
@@ -1341,18 +1345,19 @@ def decodeByBeamFast(EncDecAtt, encSent, cMBSize, max_length, beam_size, args):
         # axis=1 (defaultなので不要) ==> hstack
         lstm_states_a = chaFunc.concat(zipbeam[3])
         # concat(a, axis=0) == vstack(a)
-        prevOutIn_a = chaFunc.concat(zipbeam[4], axis=0)
+        finalHS_a = chaFunc.concat(zipbeam[4], axis=0)
         # decoder側の単語を取得
         # 一つ前の予測結果から単語を取得
         wordIndex = np.array(zipbeam[2], dtype=np.int32)
         inputEmbList = EncDecAtt.getDecoderInputEmbeddings(wordIndex, args)
         #######################################################################
-        lstm_states_a, next_h4_a = EncDecAtt.processOneDecInput(
-            inputEmbList, biH0, aList_a, lstm_states_a, prevOutIn_a,
-            encLen, cMBSize, args, 0.0)
-        oVector_a = EncDecAtt.generateWord(
-            next_h4_a, encLen, cMBSize, args, 0.0)
-
+        hOut, lstm_states_a = EncDecAtt.processDecLSTMOneStep(
+            inputEmbList, lstm_states_a, finalHS_a, args, 0.0)
+        # attentionありの場合 contextベクトルを計算
+        next_h4_a = EncDecAtt.calcAttention(hOut, biH0, aList_a,
+                                            encLen, cMBSize, args)
+        oVector_a = EncDecAtt.generateWord(next_h4_a, encLen,
+                                           cMBSize, args, 0.0)
         #####
         nextWordProb_a = -chaFunc.log_softmax(oVector_a.data).data
         if args.wo_rep_w:
