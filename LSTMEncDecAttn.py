@@ -1085,8 +1085,56 @@ def train_model_sub(train_mode, epoch, tData, EncDecAtt, optimizer,
                     sys.exit(255)
         ###########################
         return tInfo
+#########################################
 
 
+#########################################
+# optimizerの準備
+def setOptimizer(args, EncDecAtt):
+    # optimizerを構築
+    if args.optimizer == 'SGD':
+        optimizer = chaOpt.SGD(lr=args.lrate)
+        sys.stdout.write(
+            '# SET Learning %s: initial learning rate: %e\n' %
+            (args.optimizer, optimizer.lr))
+    elif args.optimizer == 'Adam':
+        # assert 0, "Currently Adam is not supported for asynchronous update"
+        optimizer = chaOpt.Adam(alpha=args.lrate, eps=0.1)
+        # optimizer = chaOpt.Adam(alpha=args.lrate)
+        sys.stdout.write(
+            '# SET Learning %s: initial learning rate: %e\n' %
+            (args.optimizer, optimizer.alpha))
+    elif args.optimizer == 'MomentumSGD':
+        optimizer = chaOpt.MomentumSGD(lr=args.lrate)
+        sys.stdout.write(
+            '# SET Learning %s: initial learning rate: %e\n' %
+            (args.optimizer, optimizer.lr))
+    elif args.optimizer == 'AdaDelta':
+        optimizer = chaOpt.AdaDelta(rho=args.lrate)
+        sys.stdout.write(
+            '# SET Learning %s: initial learning rate: %e\n' %
+            (args.optimizer, optimizer.rho))
+    else:
+        assert 0, "ERROR"
+
+    optimizer.setup(EncDecAtt.model)  # ここでoptimizerにモデルを貼り付け
+    if args.optimizer == 'Adam':
+        optimizer.t = 1  # warning回避のちょっとしたhack 本来はするべきではない
+
+    return optimizer
+
+
+def setGradClip(args, optimizer):
+    clipV = args.grad_clip
+    sys.stdout.write('# USE gradient clipping: %f\n' % (clipV))
+    clip_obj = Chainer_GradientClipping_rmk_v1(clipV)
+    optimizer.add_hook(clip_obj)
+
+    return clip_obj
+
+
+#########################################
+# 学習用の関数本体
 def train_model(args):
 
     prepD = None
@@ -1117,44 +1165,8 @@ def train_model(args):
 
     EncDecAtt.setToGPUs(args)  # ここでモデルをGPUに貼り付ける
 
-    # optimizerを構築
-    if args.optimizer == 'SGD':
-        optimizer = chaOpt.SGD(lr=args.lrate)
-        sys.stdout.write(
-            '# SET Learning %s: initial learning rate: %e\n' %
-            (args.optimizer, optimizer.lr))
-    elif args.optimizer == 'Adam':
-        optimizer = chaOpt.Adam(alpha=args.lrate)
-        sys.stdout.write(
-            '# SET Learning %s: initial learning rate: %e\n' %
-            (args.optimizer, optimizer.alpha))
-    elif args.optimizer == 'MomentumSGD':
-        optimizer = chaOpt.MomentumSGD(lr=args.lrate)
-        sys.stdout.write(
-            '# SET Learning %s: initial learning rate: %e\n' %
-            (args.optimizer, optimizer.lr))
-    elif args.optimizer == 'AdaDelta':
-        optimizer = chaOpt.AdaDelta(rho=args.lrate)
-        sys.stdout.write(
-            '# SET Learning %s: initial learning rate: %e\n' %
-            (args.optimizer, optimizer.rho))
-    else:
-        assert 0, "ERROR"
-
-    optimizer.setup(EncDecAtt.model)  # ここでoptimizerにモデルを貼り付け
-    if args.optimizer == 'Adam':
-        optimizer.t = 1  # warning回避のちょっとしたhack 本来はするべきではない
-
-    if args.optimizer == 'SGD':
-        clipV = args.grad_clip
-        sys.stdout.write('# USE gradient clipping: %f\n' % (clipV))
-        clip_obj = Chainer_GradientClipping_rmk_v1(clipV)
-        optimizer.add_hook(clip_obj)
-    else:
-        clipV = args.grad_clip
-        sys.stdout.write('# USE gradient clipping: %f\n' % (clipV))
-        clip_obj = Chainer_GradientClipping_rmk_v1(clipV)
-        optimizer.add_hook(clip_obj)
+    optimizer = setOptimizer(args, EncDecAtt)
+    clip_obj = setGradClip(args, optimizer)
 
     ########################################
     # 学習済みの初期モデルがあればをここで読み込む
@@ -1291,6 +1303,7 @@ def train_model(args):
 ####################################
 
 
+####################################
 # 以下，評価時だけ使う関数
 def updateBeamThreshold__2(queue, input):
     # list内の要素はlist,タプル，かつ，0番目の要素はスコアを仮定
