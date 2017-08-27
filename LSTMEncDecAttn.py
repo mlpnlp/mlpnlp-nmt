@@ -967,118 +967,124 @@ class TrainProcInfo:
 # 学習用のサブルーチン
 def train_model_sub(train_mode, epoch, tData, EncDecAtt, optimizer,
                     clip_obj, start_time, args):
-    #####################
-    tInfo = TrainProcInfo()
-    prnCnt = 0
-    #####################
-    if train_mode > 0:  # train
-        dropout_rate = args.dropout_rate
-    else:              # dev
-        dropout_rate = 0
-    #####################
-    if args.chainer_version_check[0] == 2:
+    if 1:  # 並列処理のコードとインデントを揃えるため．．．
+        #####################
+        tInfo = TrainProcInfo()
+        prnCnt = 0
+        #####################
         if train_mode > 0:  # train
-            chainer.global_config.train = True
-            chainer.global_config.enable_backprop = True
-            sys.stderr.write(
-                ('# TRAIN epoch {} drop rate={} | CHAINER CONFIG  [{}] \n'
-                 .format(epoch, dropout_rate, chainer.global_config.__dict__)))
+            dropout_rate = args.dropout_rate
         else:              # dev
-            chainer.global_config.train = False
-            chainer.global_config.enable_backprop = False
-            sys.stderr.write(
-                ('# DEV.  epoch {} drop rate={} | CHAINER CONFIG  [{}] \n'
-                 .format(epoch, dropout_rate, chainer.global_config.__dict__)))
-    else:
-        if train_mode > 0:  # train
-            args.dropout_mode = args.dropout_mode_orig
-        else:              # dev
-            args.dropout_mode = False
-    #####################
-    # メインループ
-    for encSent, decSent in tData:
-        # if 1:
-        try:
-            ###########################
+            dropout_rate = 0
+        #####################
+        if args.chainer_version_check[0] == 2:
             if train_mode > 0:  # train
-                EncDecAtt.model.cleargrads()  # パラメタ更新のためにgrad初期化
-            ###########################
-            encInfo = EncDecAtt.encodeSentenceFWD(
-                train_mode, encSent, args, dropout_rate)
-            loss_stat, acc_stat = EncDecAtt.trainOneMiniBatch(
-                train_mode, decSent, encInfo, args, dropout_rate)
-            ###########################
-            cMBSize = encInfo.cMBSize  # mini batch のiサイズは毎回違うので取得
-            encLen = len(encSent)
-            decLen = len(decSent)
-            tInfo.instanceNum += cMBSize  # 文数を数える
-            tInfo.batchCount += 1  # minibatchで何回処理したか
-            tInfo.corTot += acc_stat[0]
-            tInfo.incorTot += acc_stat[1]
-            tInfo.trainsizeTot += acc_stat[2]
-            tInfo.procTot += acc_stat[3]
-            # 強制的にGPUからCPUに値を移すため floatを利用
-            tInfo.lossVal += float(loss_stat)
-            ###########################
-            if train_mode > 0:
-                optimizer.update()  # ここでパラメタ更新
+                chainer.global_config.train = True
+                chainer.global_config.enable_backprop = True
+                sys.stderr.write(
+                    ('# TRAIN epoch {} drop rate={} | CHAINER CONFIG  [{}] \n'
+                     .format(epoch, dropout_rate,
+                             chainer.global_config.__dict__)))
+            else:              # dev
+                chainer.global_config.train = False
+                chainer.global_config.enable_backprop = False
+                sys.stderr.write(
+                    ('# DEV.  epoch {} drop rate={} | CHAINER CONFIG  [{}] \n'
+                     .format(epoch, dropout_rate,
+                             chainer.global_config.__dict__)))
+        else:
+            if train_mode > 0:  # train
+                args.dropout_mode = args.dropout_mode_orig
+            else:              # dev
+                args.dropout_mode = False
+        #####################
+        # メインループ
+        for encSent, decSent in tData:
+            # if 1:
+            try:
                 ###########################
-                tInfo.gnorm = clip_obj.norm_orig
-                tInfo.gnormLimit = clip_obj.threshold
-                if prnCnt == 100:
-                    # TODO 処理が重いので実行回数を減らす ロが不要ならいらない
-                    xp = cuda.get_array_module(encInfo.lstmVars[0].data)
-                    tInfo.pnorm = float(xp.sqrt(chainer.optimizer._sum_sqnorm(
-                        [p.data for p in optimizer.target.params()])))
-            ####################
-            del encInfo
-            ###################
-            tInfo.encMaxLen = max(encLen * cMBSize, tInfo.encMaxLen)
-            tInfo.decMaxLen = max(decLen * cMBSize, tInfo.decMaxLen)
-            ###################
-            if args.verbose == 0:
-                pass  # 途中結果は表示しない
-            else:
-                msgA = tInfo.print_strings(
-                    train_mode, epoch, cMBSize, encLen, decLen,
-                    start_time, args)
-                if train_mode > 0 and prnCnt >= 100:
-                    if args.verbose > 1:
-                        sys.stdout.write('\r')
-                    sys.stdout.write('%s\n' % (msgA))
-                    prnCnt = 0
-                elif args.verbose > 2:
-                    sys.stderr.write('\n%s' % (msgA))
-                elif args.verbose > 1:
-                    sys.stderr.write('\r%s' % (msgA))
-            ###################
-            prnCnt += 1
-        except Exception as e:
-            # メモリエラーなどが発生しても処理を終了せずに
-            # そのサンプルをスキップして次に進める
-            flag = 0
-            if args.gpu_enc >= 0 and args.gpu_dec >= 0:
-                import cupy
-                if type(e) == cupy.cuda.runtime.CUDARuntimeError:
+                if train_mode > 0:  # train
+                    EncDecAtt.model.cleargrads()  # パラメタ更新のためにgrad初期化
+                ###########################
+                encInfo = EncDecAtt.encodeSentenceFWD(
+                    train_mode, encSent, args, dropout_rate)
+                loss_stat, acc_stat = EncDecAtt.trainOneMiniBatch(
+                    train_mode, decSent, encInfo, args, dropout_rate)
+                ###########################
+                # mini batch のiサイズは毎回違うので取得
+                cMBSize = encInfo.cMBSize
+                encLen = len(encSent)
+                decLen = len(decSent)
+                tInfo.instanceNum += cMBSize  # 文数を数える
+                tInfo.batchCount += 1  # minibatchで何回処理したか
+                tInfo.corTot += acc_stat[0]
+                tInfo.incorTot += acc_stat[1]
+                tInfo.trainsizeTot += acc_stat[2]
+                tInfo.procTot += acc_stat[3]
+                # 強制的にGPUからCPUに値を移すため floatを利用
+                tInfo.lossVal += float(loss_stat)
+                ###########################
+                if train_mode > 0:
+                    optimizer.update()  # ここでパラメタ更新
+                    ###########################
+                    tInfo.gnorm = clip_obj.norm_orig
+                    tInfo.gnormLimit = clip_obj.threshold
+                    if prnCnt == 100:
+                        # TODO 処理が重いので実行回数を減らす ロが不要ならいらない
+                        xp = cuda.get_array_module(encInfo.lstmVars[0].data)
+                        tInfo.pnorm = float(
+                            xp.sqrt(chainer.optimizer._sum_sqnorm(
+                                [p.data for p in optimizer.target.params()])))
+                ####################
+                del encInfo
+                ###################
+                tInfo.encMaxLen = max(encLen * cMBSize, tInfo.encMaxLen)
+                tInfo.decMaxLen = max(decLen * cMBSize, tInfo.decMaxLen)
+                ###################
+                if args.verbose == 0:
+                    pass  # 途中結果は表示しない
+                else:
+                    msgA = tInfo.print_strings(
+                        train_mode, epoch, cMBSize, encLen, decLen,
+                        start_time, args)
+                    if train_mode > 0 and prnCnt >= 100:
+                        if args.verbose > 1:
+                            sys.stdout.write('\r')
+                        sys.stdout.write('%s\n' % (msgA))
+                        prnCnt = 0
+                    elif args.verbose > 2:
+                        sys.stderr.write('\n%s' % (msgA))
+                    elif args.verbose > 1:
+                        sys.stderr.write('\r%s' % (msgA))
+                ###################
+                prnCnt += 1
+            except Exception as e:
+                # メモリエラーなどが発生しても処理を終了せずに
+                # そのサンプルをスキップして次に進める
+                flag = 0
+                if args.gpu_enc >= 0 and args.gpu_dec >= 0:
+                    import cupy
+                    if isinstance(e, cupy.cuda.runtime.CUDARuntimeError):
+                        cMBSize = len(encSent[0])
+                        encLen = len(encSent)
+                        decLen = len(decSent)
+                        sys.stdout.write(
+                            ('\r# GPU Memory Error? Skip! {} | enc={} dec={} '
+                             'mbs={} total={} | {}\n'.format(
+                                 tInfo.batchCount, encLen, decLen, cMBSize,
+                                 (encLen + decLen) * cMBSize, type(e))))
+                        sys.stdout.flush()
+                        flag = 1
+                if flag == 0:
                     sys.stdout.write(
-                        ('\r# GPU Memory Error? Skip! {} | enc={} dec={} '
-                         'mbs={} total={} | {}\n'.format(
-                             tInfo.batchCount, len(encSent), len(decSent),
-                             len(encSent[0]),
-                             (len(encSent) + len(decSent)) * len(encSent[0]),
-                             type(e))))
+                        ('\r# Fatal Error? {} | {} | {}\n'.format(
+                            tInfo.batchCount, type(e), e.args)))
+                    import traceback
+                    traceback.print_exc()
                     sys.stdout.flush()
-                    flag = 1
-            if flag == 0:
-                sys.stdout.write(
-                    ('\r# Fatal Error? {} | {} | {}\n'.format(
-                        tInfo.batchCount, type(e), e.args)))
-                import traceback
-                traceback.print_exc()
-                sys.stdout.flush()
-                sys.exit(255)
-    ###########################
-    return tInfo
+                    sys.exit(255)
+        ###########################
+        return tInfo
 
 
 def train_model(args):
@@ -1187,12 +1193,13 @@ def train_model(args):
     # 学習のループ
     for epoch in six.moves.range(args.epoch):
         ####################################
+        # devの評価モード
         if args.encDevelDataFile and args.decDevelDataFile:
             train_mode = 0
             begin = time.time()
             sys.stdout.write(
-                '# Dev. data | total mini batch bucket size = {0}\n'.format(
-                    len(develData)))
+                ('# Dev. data | total mini batch bucket size = {0}\n'.format(
+                    len(develData))))
             tInfo = train_model_sub(train_mode, epoch, develData, EncDecAtt,
                                     None, clip_obj, begin, args)
             msgA = tInfo.print_strings(train_mode, epoch, 0, 0, 0, begin, args)
@@ -1225,6 +1232,7 @@ def train_model(args):
             prevLossDevel = tInfo.lossVal
             prevAccDevel = tInfo.corTot
         ####################################
+        # 学習モード
         # shuffleしながらmini batchを全て作成する
         # epoch==0のときは長い順（メモリ足りない場合の対策 やらなくてもよい）
         if True:  # 学習は必ず行うことが前提
@@ -1457,7 +1465,7 @@ def decodeByBeamFast(EncDecAtt, encSent, cMBSize, max_length, beam_size, args):
 
 
 def rerankingByLengthNormalizedLoss(beam, wposi):
-    beam.sort(key=lambda b: b[0] / (len(b[wposi])-1))
+    beam.sort(key=lambda b: b[0] / (len(b[wposi]) - 1))
     return beam
 
 
