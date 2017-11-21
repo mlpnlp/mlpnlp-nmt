@@ -1099,8 +1099,7 @@ def setOptimizer(args, EncDecAtt):
             (args.optimizer, optimizer.lr))
     elif args.optimizer == 'Adam':
         # assert 0, "Currently Adam is not supported for asynchronous update"
-        optimizer = chaOpt.Adam(alpha=args.lrate, eps=0.1)
-        # optimizer = chaOpt.Adam(alpha=args.lrate)
+        optimizer = chaOpt.Adam(alpha=args.lrate)
         sys.stdout.write(
             '# SET Learning %s: initial learning rate: %e\n' %
             (args.optimizer, optimizer.alpha))
