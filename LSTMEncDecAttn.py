@@ -20,14 +20,6 @@
 # * サンプルの利用法
 # サンプルデータはWMT16のページから入手
 # http://www.statmt.org/wmt16/translation-task.html
-# vocabファイルの準備例
-for f in sample_data/newstest2012-4p.{en,de} ;do \
-    echo ${f} ; \
-    cat ${f} | sed '/^$/d' | perl -pe 's/^\s+//; s/\s+\n$/\n/; s/ +/\n/g'  | \
-    LC_ALL=C sort | LC_ALL=C uniq -c | LC_ALL=C sort -r -g -k1 | \
-    perl -pe 's/^\s+//; ($a1,$a2)=split;
-       if( $a1 >= 3 ){ $_="$a2\t$a1\n" }else{ $_="" } ' > ${f}.vocab_t3_tab ;\
-done
 # 学習 (GPUが無い環境では以下でGPU=-1として実行)
 SLAN=de; TLAN=en; GPU=0;  EP=13 ;  \
 MODEL=filename_of_sample_model.model ; \
@@ -89,7 +81,7 @@ import random
 import math
 import six
 import io
-# import codecs
+import codecs
 
 import chainer
 import chainer.functions as chaFunc
@@ -97,6 +89,18 @@ import chainer.optimizers as chaOpt
 import chainer.links as chaLink
 import chainer.serializers as chaSerial
 from chainer import cuda
+
+# chainer v4対応
+
+
+def _sum_sqnorm(arr):
+    sq_sum = collections.defaultdict(float)
+    for x in arr:
+        with cuda.get_device_from_array(x) as dev:
+            x = x.ravel()
+            s = x.dot(x)
+            sq_sum[int(dev)] += s
+    return sum([float(i) for i in six.itervalues(sq_sum)])
 
 
 # gradientのnormなどを効率的に取得するための処理
@@ -111,7 +115,7 @@ class Chainer_GradientClipping_rmk_v1(chainer.optimizer.GradientClipping):
         self.norm_orig = 1
 
     def __call__(self, opt):
-        self.norm_orig = np.sqrt(chainer.optimizer._sum_sqnorm(
+        self.norm_orig = np.sqrt(_sum_sqnorm(
             [p.grad for p in opt.target.params()]))
         self.norm = self.norm_orig
         self.rate = self.threshold / self.norm_orig
@@ -147,11 +151,7 @@ class NLayerLSTM(chainer.ChainList):
         hout = None
         for c, layer in enumerate(self):
             if c > 0:  # 一層目(embedding)の入力に対してはdropoutしない
-                if args.chainer_version_check[0] == 2:
-                    hin = chaFunc.dropout(hout, ratio=dropout_rate)
-                else:
-                    hin = chaFunc.dropout(
-                        hout, train=args.dropout_mode, ratio=dropout_rate)
+                hin = chaFunc.dropout(hout, ratio=dropout_rate)
             else:  # 二層目以降の入力はdropoutする
                 hin = input_states
             hout = layer(hin)
@@ -190,7 +190,7 @@ class NStepLSTMpp(chainer.ChainList):
         weights = []
         direction = 1  # ここでは，からなず一方向ずつ構築するので1にする
         t_name = name
-        if name is not "":
+        if name != "":
             t_name = '%s_' % (name)
 
         for i in six.moves.range(n_layers):
@@ -238,18 +238,12 @@ class NStepLSTMpp(chainer.ChainList):
     def init_hx(self, xs):
         hx_shape = self.n_layers * self.direction
         with cuda.get_device_from_id(self._device_id):
-            if args.chainer_version_check[0] == 2:
-                hx = chainer.Variable(
-                    self.xp.zeros((hx_shape, xs.data.shape[1], self.out_size),
-                                  dtype=xs.dtype))
-            else:
-                hx = chainer.Variable(
-                    self.xp.zeros((hx_shape, xs.data.shape[1], self.out_size),
-                                  dtype=xs.dtype),
-                    volatile='auto')
+            hx = chainer.Variable(
+                self.xp.zeros((hx_shape, xs.data.shape[1], self.out_size),
+                              dtype=xs.dtype))
         return hx
 
-    def __call__(self, hx, cx, xs, flag_train, args):
+    def __call__(self, hx, cx, xs):
         if hx is None:
             hx = self.init_hx(xs)
         if cx is None:
@@ -258,13 +252,8 @@ class NStepLSTMpp(chainer.ChainList):
         # hx, cx は (layer数, minibatch数，出力次元数)のtensor
         # xsは (系列長, minibatch数，出力次元数)のtensor
         # Note: chaFunc.n_step_lstm() は最初の入力層にはdropoutしない仕様
-        if args.chainer_version_check[0] == 2:
-            hy, cy, ys = chaFunc.n_step_lstm(
-                self.n_layers, self.dropout_rate, hx, cx, self.ws, self.bs, xs)
-        else:
-            hy, cy, ys = chaFunc.n_step_lstm(
-                self.n_layers, self.dropout_rate, hx, cx, self.ws, self.bs, xs,
-                train=flag_train, use_cudnn=self.use_cudnn)
+        hy, cy, ys = chaFunc.n_step_lstm(
+            self.n_layers, self.dropout_rate, hx, cx, self.ws, self.bs, xs)
         # hy, cy は (layer数, minibatch数，出力次元数) で出てくる
         # ysは最終隠れ層だけなので，系列長のタプルで
         # 各要素が (minibatch数，出力次元数)
@@ -279,7 +268,7 @@ class NLayerCuLSTM(chainer.ChainList):
     def __init__(self, n_layers, eDim, hDim, name=""):
         layers = [0] * n_layers
         for z in six.moves.range(n_layers):
-            if name is not "":  # 名前を付ける
+            if name != "":  # 名前を付ける
                 t_name = '%s_L%d' % (name, z + 1)
             # 毎回一層分のNStepLSTMを作成
             if z == 0:
@@ -293,25 +282,180 @@ class NLayerCuLSTM(chainer.ChainList):
         super(NLayerCuLSTM, self).__init__(*layers)
 
     # layre_numで指定された層をinput_state_listの長さ分回す
-    def __call__(self, layer_num, input_state_list, flag_train,
-                 dropout_rate, args):
+    def __call__(self, layer_num, input_state_list, dropout_rate):
         # Note: chaFunc.n_step_lstm() は最初の入力にはdropoutしない仕様なので，
         # 一層毎に手動で作った場合は手動でdropoutが必要
         if layer_num > 0:
-            if args.chainer_version_check[0] == 2:
-                hin = chaFunc.dropout(input_state_list, ratio=dropout_rate)
-            else:
-                hin = chaFunc.dropout(input_state_list,
-                                      train=args.dropout_mode,
-                                      ratio=dropout_rate)
+            hin = chaFunc.dropout(input_state_list, ratio=dropout_rate)
         else:
             hin = input_state_list
         # layer_num層目の処理を一括で行う
-        hy, cy, hout = self[layer_num](None, None, hin, flag_train, args)
+        hy, cy, hout = self[layer_num](None, None, hin)
         return hy, cy, hout
 
+#########################################
+# TODO: とりあえず今の所は，後続の単語n_size文を予測するモードになっていて，複数の出力を読めるようにはなっていないので注意が必要!!
+# n_size=1なら普通のoutputとして機能する
+
+
+class DecInOutShareL(chainer.ChainList):
+    def __init__(self, eDim, VocabSize, hDim=0, param_share=True, name=""):
+
+        self.eDim = eDim
+        self.hDim = hDim
+        self.VocabSize = VocabSize
+        self.param_share = param_share
+        self.total_params = 0
+
+        if hDim > 0:
+            layers = [0] * 3  # 変換行列分
+        else:
+            layers = [0] * 2
+        layers[0] = chaLink.EmbedID(self.VocabSize, self.eDim,
+                                    ignore_label=-1)
+        layers[0].W.name = name + "_Vocab_W"
+        self.total_params += (self.eDim * self.VocabSize)
+
+        if param_share:
+            layers[1] = chaLink.Bias(shape=(self.VocabSize,))
+            layers[1].b.name = name + "_output_b"
+            self.total_params += (self.VocabSize)
+        else:
+            layers[1] = chaLink.Linear(self.eDim, self.VocabSize)
+            layers[1].W.name = name + "_output_W"
+            layers[1].b.name = name + "_output_b"
+            self.total_params += (self.eDim * self.VocabSize
+                                  + self.VocabSize)
+        if hDim > 0:
+            layers[2] = chaLink.Linear(self.hDim, self.eDim)
+            layers[2].W.name = name + "_tr_W"
+            layers[2].b.name = name + "_tr_b"
+            self.total_params += (self.hDim * eDim + eDim)
+
+        sys.stderr.write(
+            ('# DecInOutShareL dim:{} {} {} | {} | total={}\n'
+             .format(
+                 self.eDim, self.VocabSize, self.hDim,
+                 self.param_share, self.total_params
+             )))
+        super(DecInOutShareL, self).__init__(*layers)
+
+    def to_gpu(self, gpu_num):
+        for layer in self:
+            layer.to_gpu(gpu_num)
+
+    def getEmbedID(self, index_list):
+        return self[0](index_list)
+
+    def calcOutput(self, hIn):
+        if self.hDim > 0:
+            hIn = self[2](hIn)  # 次元数を合わせるため，一回変換
+        if self.param_share:
+            return chaFunc.linear(hIn, self[0].W, self[1].b)
+        else:
+            return self[1](hIn)
+
+    def getTotalParams(self):
+        return self.total_params
+
+#########################################
+# TODO: とりあえず今の所は，後続の単語n_size文を予測するモードになっていて，複数の出力を読めるようにはなっていないので注意が必要!!
+# n_size=1なら普通のoutputとして機能する
+
+
+class MultiOutputL(chainer.ChainList):
+    def __init__(self, eDim, hDim, decVocabSize, param_share=True, name=""):
+
+        self.total_params = 0
+        self.eDim = eDim
+        self.hDim = hDim
+        self.decVocabSize = decVocabSize  # list
+        self.param_share = param_share
+
+        self.n_size = len(decVocabSize)
+        assert self.n_size > 0, "ERROR"
+
+        layers = [0] * self.n_size  # 層分の領域を確保
+        for z in six.moves.range(self.n_size):
+            if z == 0 and not self.param_share:
+                t_param_share = False  # param_shareしない場合　
+            else:
+                t_param_share = True
+            if self.eDim == self.hDim:  # 次元数が同じ時は hDimを渡さないことでパラメタ節約
+                t_hDim = 0
+            else:
+                t_hDim = self.hDim
+
+            layers[z] = DecInOutShareL(self.eDim, self.decVocabSize[z],
+                                       hDim=t_hDim, param_share=t_param_share,
+                                       name=name + "_MultiOutputL%d" % (z))
+            self.total_params += layers[z].getTotalParams()
+
+        sys.stderr.write(
+            ('# MultiOutputL n_size:{} | dim:{} {} {} | total={}\n'
+             .format(
+                 self.n_size,
+                 self.eDim, self.hDim, self.decVocabSize,
+                 self.total_params
+             )))
+        super(MultiOutputL, self).__init__(*layers)
+
+    def to_gpu(self, gpu_num):
+        for layer in self:
+            layer.to_gpu(gpu_num)
+
+    def getInputEmbeddings(self, input_idx_list_mb, posi, args):
+        xp = cuda.get_array_module(self[0][0].W.data)
+        emb = self[posi].getEmbedID(
+            chainer.Variable(xp.array(input_idx_list_mb)))
+        return emb
+
+    def calcLoss(self, train_mode, index, input_list,
+                 cMBSize, decSent, dropout_rate, args):
+        closs = 0
+        hlast_dr = chaFunc.dropout(input_list[index], ratio=dropout_rate)
+        correct = 0
+        incorrect = 0
+        proc = 0
+        for z in six.moves.range(self.n_size):
+            cLabel = decSent[z][index + 1]  # 正解は次の時刻なので，index+1を使用
+            proc += (xp.count_nonzero(cLabel + 1))
+            oVector_t = self[z].calcOutput(hlast_dr)
+            closs += chaFunc.softmax_cross_entropy(
+                oVector_t, cLabel, normalize=False)
+            # TODO 全ての正解率の平均にしてもよい
+            if (train_mode == 0 or args.doEvalAcc > 0):
+                # 予測した単語のID配列 CuPy
+                t_pred_arr = oVector_t.data.argmax(axis=1)
+                t_correct = (
+                    cLabel.size -
+                    xp.count_nonzero(
+                        cLabel -
+                        t_pred_arr))
+                # 予測不要の数から正解した数を引く # +1はbroadcast
+                t_incorrect = xp.count_nonzero(cLabel + 1) - t_correct
+                correct += t_correct
+                incorrect += t_incorrect
+        ###########
+        closs /= (1.0 * self.n_size)  # スケールを合わせる為に，処理した数の平均にする
+        ###########
+        return closs, correct, incorrect, proc
+
+    def getProbSingle(self, index, input_list, cMBSize, args):
+        hlast_dr = chaFunc.dropout(input_list[index], ratio=0.0)
+        oVector_t = self[0].calcOutput(hlast_dr)
+        nextWordProb_a = -chaFunc.log_softmax(oVector_t.data).data
+        return nextWordProb_a
+
+    def getProbSingle2(self, index, input_list, cMBSize, args):
+        hlast_dr = chaFunc.dropout(input_list[index], ratio=0.0)
+        oVector_t = self[0].calcOutput(hlast_dr)
+        nextWordProb_a = chaFunc.softmax(oVector_t.data).data
+        return nextWordProb_a
 
 # EncDecの本体
+
+
 class EncoderDecoderAttention:
     def __init__(self, encoderVocab, decoderVocab, setting):
         self.encoderVocab = encoderVocab  # encoderの語彙
@@ -320,9 +464,11 @@ class EncoderDecoderAttention:
         self.index2encoderWord = {
             v: k for k, v in six.iteritems(
                 self.encoderVocab)}  # 実際はなくてもいい
-        self.index2decoderWord = {
-            v: k for k, v in six.iteritems(
-                self.decoderVocab)}  # decoderで利用
+        self.index2decoderWord = [0] * len(self.decoderVocab)
+        for i, f in enumerate(self.decoderVocab):
+            self.index2decoderWord[i] = {
+                v: k for k, v in six.iteritems(f)}  # decoderで利用
+        ##########
         self.eDim = setting.eDim
         self.hDim = setting.hDim
         self.flag_dec_ifeed = setting.flag_dec_ifeed
@@ -331,34 +477,55 @@ class EncoderDecoderAttention:
         self.flag_merge_encfwbw = setting.flag_merge_encfwbw
 
         self.encVocabSize = len(encoderVocab)
-        self.decVocabSize = len(decoderVocab)
+        # self.decVocabSize = len(decoderVocab)
+        self.decVocabSize = [0] * len(self.decoderVocab)
+        for i, f in enumerate(self.decoderVocab):
+            self.decVocabSize[i] = len(f)
+        ###############
         self.n_layers = setting.n_layers
+
+        # self.window_size = 1 #setting.window_size
+        self.output_layer_type = setting.output_layer_type
+        self.decEmbTying = setting.decEmbTying
 
     # encoder-docoderのネットワーク
     def initModel(self):
         sys.stderr.write(
-            ('Vocab: enc=%d dec=%d embedDim: %d, hiddenDim: %d, '
-             'n_layers: %d # [Params] dec inputfeed [%d] '
-             '| use Enc BOS/EOS [%d] | attn mode [%d] '
-             '| merge Enc FWBW [%d]\n'
-             % (self.encVocabSize, self.decVocabSize, self.eDim, self.hDim,
-                self.n_layers, self.flag_dec_ifeed,
-                self.flag_enc_boseos, self.attn_mode,
-                self.flag_merge_encfwbw)))
+            ('Vocab: enc={} dec={} embedDim: {}, hiddenDim: {}, '
+             'n_layers: {} # [Params] dec inputfeed [{}] '
+             '| use Enc BOS/EOS [{}] | attn mode [{}] '
+             '| merge Enc FWBW [{}] '
+             '| dec Emb Tying [{}]\n' .format(
+                 self.encVocabSize,
+                 self.decVocabSize,
+                 self.eDim,
+                 self.hDim,
+                 self.n_layers,
+                 self.flag_dec_ifeed,
+                 self.flag_enc_boseos,
+                 self.attn_mode,
+                 self.flag_merge_encfwbw,
+                 self.decEmbTying,
+             )))
         self.model = chainer.Chain(
             # encoder embedding層
-            encoderEmbed=chaLink.EmbedID(self.encVocabSize, self.eDim),
-            # decoder embedding層
-            decoderEmbed=chaLink.EmbedID(self.decVocabSize, self.eDim,
+            encoderEmbed=chaLink.EmbedID(self.encVocabSize, self.eDim,
                                          ignore_label=-1),
-            # 出力層
-            decOutputL=chaLink.Linear(self.hDim, self.decVocabSize),
         )
         # logに出力する際にわかりやすくするための名前付け なくてもよい
         self.model.encoderEmbed.W.name = "encoderEmbed_W"
-        self.model.decoderEmbed.W.name = "decoderEmbed_W"
-        self.model.decOutputL.W.name = "decoderOutput_W"
-        self.model.decOutputL.b.name = "decoderOutput_b"
+
+        if self.output_layer_type == 0:
+            # TODO: 今は評価時のbeam searchの処理を考えて0番目のdecVocabしか入力としては扱わない
+            # TODO: 出力側の2番目以降の情報は，現在は学習時の正解としてのみ利用可 embeddingとしては使えない
+            self.model.add_link(
+                "decOutputL",
+                MultiOutputL(self.eDim, self.hDim, self.decVocabSize,
+                             param_share=self.decEmbTying,
+                             name="decoderOutput"
+                             ))
+        else:
+            assert 0, "ERROR"
 
         if self.flag_merge_encfwbw == 0:  # default
             self.model.add_link(
@@ -428,8 +595,8 @@ class EncoderDecoderAttention:
             self.model.encLSTM_f.to_gpu(args.gpu_enc)
             self.model.encLSTM_b.to_gpu(args.gpu_enc)
 
-            if not args.flag_emb_cpu:  # 指定があればCPU側のメモリ上に置く
-                self.model.decoderEmbed.to_gpu(args.gpu_dec)
+            # if not args.flag_emb_cpu:  # 指定があればCPU側のメモリ上に置く
+            #    self.model.decoderEmbed.to_gpu(args.gpu_dec)
             self.model.decLSTM.to_gpu(args.gpu_dec)
             self.model.decOutputL.to_gpu(args.gpu_dec)
 
@@ -461,11 +628,8 @@ class EncoderDecoderAttention:
                 key=lambda x: x[0])
             for n, p in named_params:
                 with cuda.get_device(p.data):
-                    if args.chainer_version_check[0] == 2:
-                        p.copydata(chainer.Parameter(
-                            t_initializer, p.data.shape))
-                    else:
-                        chainer.initializers.init_weight(p.data, t_initializer)
+                    p.copydata(chainer.Parameter(
+                        t_initializer, p.data.shape))
         elif init_type == "normal":
             sys.stdout.write("# initializer is [normal] [%f]\n" % (init_scale))
             t_initializer = chainer.initializers.Normal(init_scale)
@@ -474,11 +638,8 @@ class EncoderDecoderAttention:
                 key=lambda x: x[0])
             for n, p in named_params:
                 with cuda.get_device(p.data):
-                    if args.chainer_version_check[0] == 2:
-                        p.copydata(chainer.Parameter(
-                            t_initializer, p.data.shape))
-                    else:
-                        chainer.initializers.init_weight(p.data, t_initializer)
+                    p.copydata(chainer.Parameter(
+                        t_initializer, p.data.shape))
         else:  # "default"
             sys.stdout.write(
                 "# initializer is [defalit] [%f]\n" %
@@ -499,7 +660,7 @@ class EncoderDecoderAttention:
             optimizer.target.namedparams(),
             key=lambda x: x[0])
         for n, p in named_params:
-            t_norm = chainer.optimizer._sum_sqnorm(p.data)
+            t_norm = _sum_sqnorm(p.data)
             sys.stdout.write(
                 '### {} {} {} {} {}\n'.format(
                     p.name, p.data.ndim, p.data.shape, p.data.size, t_norm))
@@ -512,57 +673,122 @@ class EncoderDecoderAttention:
                     init_type, init_scale))
 
     ###############################################
+    # 学習済みのw2vデータを読み込む
+    ###############################################
+    def readWord2vecResult(self, init_emb_by_w2v_file, init_emb_by_w2v_mode):
+        srcVCount = 0
+        trgVCount = [0] * len(self.decVocabSize)
+        i = 0
+
+        for t_file in init_emb_by_w2v_file.split(':'):
+            sys.stdout.write('# W2V file: [%s]\n' % (t_file))
+            for i, line in enumerate(codecs.open(
+                    t_file, "r", "utf-8", "ignore")):
+                if i == 0:   # 一行目はステータス行なので，とばす
+                    status = line.strip().split(' ')
+                    vec = np.array(status, dtype=np.int32)
+                    sys.stdout.write(
+                        '# W2V file: [{}] [{}][{}][{}] | mode:[{}]\n'.format(
+                            t_file, len(vec), vec[0], vec[1],
+                            init_emb_by_w2v_mode))
+                    continue
+                else:
+                    lineList = line.strip().split(' ')
+                    word = lineList[0]
+                    vec = np.array(lineList[1:], dtype=np.float32)
+                    if i < 10:
+                        sys.stdout.write(
+                            '# W2V file: [%d][%d]\n' % (i, len(lineList)))
+
+                    if (init_emb_by_w2v_mode == 0 or
+                            init_emb_by_w2v_mode == 2) and \
+                            word in self.encoderVocab:  # encoderの語彙
+                        self.model.encoderEmbed.W.data[
+                            self.encoderVocab[word]] = xp.array(vec)
+                        srcVCount += 1
+                    if (init_emb_by_w2v_mode == 1 or
+                            init_emb_by_w2v_mode == 2):
+                        for z in six.moves.range(len(self.decoderVocab)):
+                            if word in self.decoderVocab[z]:  # decoderの語彙
+                                self.model.decOutputL[z][0].W.data[
+                                    self.decoderVocab[z][word]] = xp.array(vec)
+                                trgVCount[z] += 1
+
+            if 1:
+                sys.stdout.write(
+                    '# W2V file: [%s]  DONE %d lines '
+                    '| encVCount %d %d %.2f\n' % (
+                        t_file, i,
+                        srcVCount, len(self.encoderVocab),
+                        float(100.0 * srcVCount / len(self.encoderVocab)),
+                    ))
+            for z in six.moves.range(len(self.decVocabSize)):
+                sys.stdout.write(
+                    '# W2V file: [%s]  DONE %d lines '
+                    '| decVCount [%d] %d %d %.2f\n' %
+                    (t_file, i, z, trgVCount[z], len(
+                        self.decoderVocab[z]), float(
+                        100.0 * trgVCount[z] / len(
+                            self.decoderVocab[z])), ))
+        return i
+
+    ###############################################
     # 情報を保持するためだけのクラス 主に 細切れにbackwardするための用途
     class encInfoObject:
-        def __init__(self, finalHiddenVars, finalLSTMVars, encLen, cMBSize):
+        def __init__(self, finalHiddenVars, finalLSTMVars,
+                     enc4BKWOrig, enc4BKWCopy, encLen, cMBSize):
             self.attnList = finalHiddenVars
             self.lstmVars = finalLSTMVars
+            self.enc4BKWOrig = enc4BKWOrig  # 計算グラフを分断した際の元のVariable
+            self.enc4BKWCopy = enc4BKWCopy  # 計算グラフを分断した際の新しく作成したVariable
             self.encLen = encLen
             self.cMBSize = cMBSize
     ###############################################
 
-    # encoderのembeddingを取得する関数
-    def getEncoderInputEmbeddings(self, input_idx_list, args):
+    def getEncoderInputEmbeddings(self, input_idx_list_mb, args):
         # 一文一括でembeddingを取得  この方が効率が良い？
         if args.flag_emb_cpu and args.gpu_enc >= 0:
             encEmbList = chaFunc.copy(
-                self.model.encoderEmbed(chainer.Variable(input_idx_list)),
-                args.gpu_enc)
+                self.model.encoderEmbed(chainer.Variable(
+                    np.array(input_idx_list_mb, dtype=np.int32).T
+                )))
         else:
             xp = cuda.get_array_module(self.model.encoderEmbed.W.data)
+            # 3
+            # cMBSize = len(input_idx_list_mb)
+            # encLen = len(input_idx_list_mb[0])
+            # fsize = len(input_idx_list_mb[0][0])
+            # 3
             encEmbList = self.model.encoderEmbed(
-                chainer.Variable(xp.array(input_idx_list)))
+                chainer.Variable(
+                    xp.transpose(xp.array(input_idx_list_mb), axes=(1, 0, 2)))
+            )
+            # sys.stdout.write('#2 {} | {} {}\n'.format(encEmbList.shape,
+            # cMBSize, encLen))
+            encEmbList = chaFunc.sum(encEmbList, axis=2)
+            # sys.stdout.write('#3 {} | {} {}\n'.format(encEmbList.shape,
+            # cMBSize, encLen))
         return encEmbList
-
-    # decoderのembeddingを取得する関数 上のgetEncoderInputEmbeddingsとほぼ同じ
-    def getDecoderInputEmbeddings(self, input_idx_list, args):
-        if args.flag_emb_cpu and args.gpu_dec >= 0:
-            decEmbList = chaFunc.copy(
-                self.model.decoderEmbed(chainer.Variable(input_idx_list)),
-                args.gpu_dec)
-        else:
-            xp = cuda.get_array_module(self.model.decoderEmbed.W.data)
-            decEmbList = self.model.decoderEmbed(
-                chainer.Variable(xp.array(input_idx_list)))
-        return decEmbList
 
     # encoder側の入力を処理する関数
     def encodeSentenceFWD(self, train_mode, sentence, args, dropout_rate):
         if args.gpu_enc != args.gpu_dec:  # encとdecが別GPUの場合
             chainer.cuda.get_device(args.gpu_enc).use()
-        encLen = len(sentence)  # 文長
-        cMBSize = len(sentence[0])  # minibatch size
+        # encLen = len(sentence)  # 文長
+        # cMBSize = len(sentence[0])  # minibatch size
+        encLen = len(sentence[0])  # 文長
+        cMBSize = len(sentence)  # minibatch size
 
         # 一文一括でembeddingを取得  この方が効率が良い？
         encEmbList = self.getEncoderInputEmbeddings(sentence, args)
 
-        flag_train = (train_mode > 0)
+        # flag_train = (train_mode > 0)
         lstmVars = [0] * self.n_layers * 2
         if self.flag_merge_encfwbw == 0:  # fwとbwは途中で混ぜない最後で混ぜる
             hyf, cyf, fwHout = self.model.encLSTM_f(
-                None, None, encEmbList, flag_train, args)  # 前向き
+                None, None, encEmbList)  # 前向き
             hyb, cyb, bkHout = self.model.encLSTM_b(
-                None, None, encEmbList[::-1], flag_train, args)  # 後向き
+                None, None, encEmbList[::-1])  # 後向き
             for z in six.moves.range(self.n_layers):
                 lstmVars[2 * z] = cyf[z] + cyb[z]
                 lstmVars[2 * z + 1] = hyf[z] + hyb[z]
@@ -576,14 +802,14 @@ class EncoderDecoderAttention:
                     biH = fwHout + bkHout[::-1]
                 # z層目前向き
                 hyf, cyf, fwHout = self.model.encLSTM_f(
-                    z, biH, flag_train, dropout_rate, args)
+                    z, biH, dropout_rate)
                 # z層目後ろ向き
                 hyb, cyb, bkHout = self.model.encLSTM_b(
-                    z, biH[::-1], flag_train, dropout_rate, args)
+                    z, biH[::-1], dropout_rate)
                 # それぞれの階層の隠れ状態およびメモリセルをデコーダに
                 # 渡すために保持
-                lstmVars[2 * z] = chaFunc.reshape(cyf + cyb, sp)
-                lstmVars[2 * z + 1] = chaFunc.reshape(hyf + hyb, sp)
+                lstmVars[2 * z] = chaFunc.reshape(cyf[0] + cyb[0], sp)
+                lstmVars[2 * z + 1] = chaFunc.reshape(hyf[0] + hyb[0], sp)
         else:
             assert 0, "ERROR"
 
@@ -603,9 +829,41 @@ class EncoderDecoderAttention:
         biHiddenStackSW01 = chaFunc.swapaxes(biHiddenStack, 0, 1)
         # 各LSTMの最終状態を取得して，decoderのLSTMの初期状態を作成
         lstmVars = chaFunc.stack(lstmVars)
+
+        if train_mode > 0:  # backwardを効率的にするためにやや面倒なことをする
+            enc4BKWOrig = chaFunc.concat(
+                (biHiddenStackSW01, chaFunc.swapaxes(
+                    lstmVars, 0, 1)), axis=1)
+            # decが別GPUの場合にデバイス間コピー
+            if args.gpu_enc != args.gpu_dec:
+                # backwardするので，to_gpu()ではなくcopy()
+                enc4BKWOrig = chaFunc.copy(enc4BKWOrig, args.gpu_dec)
+            # ここから先は dec側のGPUのメモリにはりつく
+            # ここで計算グラフを分断
+            enc4BKWCopy = chainer.Variable(enc4BKWOrig.data)
+            # LSTMの隠れ状態の部分
+            finalHiddenVars = enc4BKWCopy[:, 0:encLen, ]
+            # 3行前でswapしたのを元に戻す
+            finalLSTMVars = chaFunc.swapaxes(enc4BKWCopy[:, encLen:, ], 0, 1)
+        else:  # テスト時は backwardいらないので，なにもせずに受渡し
+            enc4BKWOrig = None  # backward用の構造はいらないので．．．
+            enc4BKWCopy = None  # backward用の構造はいらないので．．．
+            finalHiddenVars = biHiddenStackSW01
+            finalLSTMVars = lstmVars
+            # decが別GPUの場合にデバイス間コピー
+            if args.gpu_enc != args.gpu_dec:
+                # backwardしないので copy()は不要？ to_gpu()で十分
+                finalHiddenVars.to_gpu(args.gpu_dec)
+                finalLSTMVars.to_gpu(args.gpu_dec)
+
         # encoderの情報をencInfoObjectに集約して返す
-        retO = self.encInfoObject(biHiddenStackSW01, lstmVars, encLen, cMBSize)
+        retO = self.encInfoObject(finalHiddenVars, finalLSTMVars,
+                                  enc4BKWOrig, enc4BKWCopy, encLen, cMBSize)
         return retO
+
+    def encodeSentenceBKWD(self, encInfo):
+        encInfo.enc4BKWOrig.addgrad(encInfo.enc4BKWCopy)
+        encInfo.enc4BKWOrig.backward()
 
     def prepareDecoder(self, encInfo):
         self.model.decLSTM.reset_state()
@@ -636,21 +894,24 @@ class EncoderDecoderAttention:
         aList, finalHS = self.prepareDecoder(encInfo)
 
         xp = cuda.get_array_module(encInfo.lstmVars[0].data)
-        total_loss = chainer.Variable(xp.zeros((), dtype=xp.float32))  # 初期化
+        # total_loss = chainer.Variable(xp.zeros((), dtype=xp.float32))
         total_loss_val = 0  # float
         correct = 0
         incorrect = 0
         proc = 0
-        decoder_proc = len(decSent) - 1  # ここで処理するdecoder側の単語数
+        decoder_proc = len(decSent[0]) - 1  # ここで処理するdecoder側の単語数
 
         #######################################################################
         # 1, decoder側の入力単語embeddingsをまとめて取得
-        decEmbListCopy = self.getDecoderInputEmbeddings(
-            decSent[:decoder_proc], args)
+        decEmbListOrig = self.model.decOutputL.getInputEmbeddings(
+            decSent[0][:decoder_proc], 0, args)
+        decEmbListCopy = chainer.Variable(decEmbListOrig.data)  # ここで切断
         decSent = xp.array(decSent)  # GPU上に移動
         #######################################################################
         # 2, decoder側のRNN部分を計算
+        h4_list_orig = [0] * decoder_proc
         h4_list_copy = [0] * decoder_proc
+        lstm_states_list_orig = [0] * decoder_proc
         lstm_states_list_copy = [0] * decoder_proc
         for index in six.moves.range(decoder_proc):  # decoder_len -1
             if index == 0:
@@ -663,47 +924,55 @@ class EncoderDecoderAttention:
             hOut, lstm_states = self.processDecLSTMOneStep(
                 decEmbListCopy[index], t_lstm_states,
                 t_finalHS, args, dropout_rate)
-            # lstm_statesをキャッシュ
-            lstm_states_list_copy[index] = lstm_states
+            # lstmの接続をここで分断
+            lstm_states_list_orig[index] = lstm_states
+            lstm_states_list_copy[index] = chainer.Variable(lstm_states.data)
+            # Note: 計算グラフを分断する関係で，上で取得したhOutではなく
+            # 全く同じ情報をlstm_statesの方から取得する
+            hOut = lstm_states_list_copy[index][-1]
+
             # attentionありの場合 contextベクトルを計算
             finalHS = self.calcAttention(hOut, encInfo.attnList, aList,
                                          encInfo.encLen, cMBSize, args)
-            # finalHSをキャッシュ
-            h4_list_copy[index] = finalHS
+            # 最終隠れ層でも計算グラフを分離
+            h4_list_orig[index] = finalHS
+            h4_list_copy[index] = chainer.Variable(finalHS.data)
         #######################################################################
         # 3, output(softmax)層の計算
         for index in reversed(six.moves.range(decoder_proc)):
-            # 2で用意した copyを使って最終出力層の計算をする
-            oVector = self.generateWord(h4_list_copy[index], encInfo.encLen,
-                                        cMBSize, args, dropout_rate)
-            # 正解データ
-            correctLabel = decSent[index + 1]  # xp
-            proc += (xp.count_nonzero(correctLabel + 1))
-            # 必ずminibatchsizeでわる
-            closs = chaFunc.softmax_cross_entropy(
-                oVector, correctLabel, normalize=False)
-            # これで正規化なしのloss  cf. seq2seq-attn code
-            total_loss_val += closs.data * cMBSize
-            if train_mode > 0:  # 学習データのみ backward する
-                total_loss += closs
-            # 実際の正解数を獲得したい
-            t_correct = 0
-            t_incorrect = 0
-            # Devのときは必ず評価，学習データのときはオプションに従って評価
-            if train_mode == 0 or args.doEvalAcc > 0:
-                # 予測した単語のID配列 CuPy
-                pred_arr = oVector.data.argmax(axis=1)
-                # 正解と予測が同じなら0になるはず
-                # => 正解したところは0なので，全体から引く
-                t_correct = (correctLabel.size -
-                             xp.count_nonzero(correctLabel - pred_arr))
-                # 予測不要の数から正解した数を引く # +1はbroadcast
-                t_incorrect = xp.count_nonzero(correctLabel + 1) - t_correct
+            ###################
+            closs, t_correct, t_incorrect, t_proc = \
+                self.model.decOutputL.calcLoss(
+                    train_mode, index, h4_list_copy,
+                    cMBSize, decSent, dropout_rate, args)
+            proc += t_proc
             correct += t_correct
             incorrect += t_incorrect
+            total_loss_val += closs.data * cMBSize * \
+                len(decSent)  # clossはdecの出力種類数で割っているので，ここで辻褄を合わせる
+            if train_mode > 0:  # 学習データのみ backward する
+                closs.backward()  # 最終出力層から，最終隠れ層までbackward
+                # 最終隠れ層まで戻ってきたgradを加算
+                # ここでinputfeedのgradは一つ前のループで加算されている仮定
+                h4_list_orig[index].addgrad(h4_list_copy[index])
+                h4_list_orig[index].backward()  # backward計算
+                # lstmの状態で分断したところのgradを戻す
+                lstm_states_list_orig[index].addgrad(
+                    lstm_states_list_copy[index])
+                lstm_states_list_orig[index].backward()
+            # 使い終わったデータの領域を解放
+            # 実際にここまでやる必要があるかは不明
+            del closs
+            del lstm_states_list_orig[index]
+            del lstm_states_list_copy[index]
+            del h4_list_orig[index]
+            del h4_list_copy[index]
+
         ####
         if train_mode > 0:  # 学習時のみ backward する
-            total_loss.backward()
+            decEmbListOrig.addgrad(decEmbListCopy)
+            decEmbListOrig.backward()        # decoderのembeddingのbackward実行
+            self.encodeSentenceBKWD(encInfo)  # encoderのbackward実行
 
         return total_loss_val, (correct, incorrect, decoder_proc, proc)
 
@@ -788,14 +1057,10 @@ class EncoderDecoderAttention:
         return finalH  # context
 
     # 出力層の計算
-    def generateWord(self, h4, encLen, cMBSize, args, dropout_rate):
-        if args.chainer_version_check[0] == 2:
-            oVector = self.model.decOutputL(
-                chaFunc.dropout(h4, ratio=dropout_rate))
-        else:
-            oVector = self.model.decOutputL(chaFunc.dropout(
-                h4, train=args.dropout_mode, ratio=dropout_rate))
-        return oVector
+    # def generateWord(self, h4, encLen, cMBSize, args, dropout_rate):
+    #     oVector = self.model.decOutputL(
+    #         chaFunc.dropout(h4, ratio=dropout_rate))
+    #     return oVector
 
 
 ########################################################
@@ -841,6 +1106,25 @@ class PrepareData:
             return ([word2indexDict['<s>']] +
                     indexList + [word2indexDict['</s>']])
 
+    def inputsentence2index(self, sentence, word2indexDict, input_side=False):
+        token_list = sentence.split(' ')  # 単語単位に分割
+        indexList = [0] * len(token_list)
+        for i, token_idxs in enumerate(token_list):
+            widxlst = [word2indexDict[word] if word in
+                       word2indexDict else word2indexDict['<unk>']
+                       for word in token_idxs.split('|||')]
+            indexList[i] = widxlst
+        maxfsize = max([len(widxs) for widxs in indexList])
+        indexList = [widxs + [-1] * (maxfsize - len(widxs))
+                     for widxs in indexList]
+        # encoder側でかつ，<s>と</s>を使わない設定の場合
+        if input_side and self.flag_enc_boseos == 0:
+            return indexList
+        else:  # 通常はこちら
+            return ([[word2indexDict['<s>']] + [-1] * (maxfsize - 1)] +
+                    indexList + [[word2indexDict['</s>']] + [-1] * (maxfsize
+                                                                    - 1)])
+
     def makeSentenceLenDict(self, fileName, word2indexDict, input_side=False):
         if input_side:
             d = collections.defaultdict(list)
@@ -849,25 +1133,53 @@ class PrepareData:
         sentenceNum = 0
         sampleNum = 0
         maxLen = 0
+        unk_count = 0
+        bos_count = 0
+        eos_count = 0
+
+        idx_bos = word2indexDict['<s>']
+        idx_eos = word2indexDict['</s>']
+        idx_unk = word2indexDict['<unk>']
+
         # ここで全てのデータを読み込む
         # TODO: codecsでないとエラーが出る環境がある？ 要調査 不要ならioにしたい
         with io.open(fileName, encoding='utf-8') as f:
             # with codecs.open(fileName, encoding='utf-8') as f:
             for sntNum, snt in enumerate(f):  # ここで全てのデータを読み込む
                 snt = snt.strip()
-                indexList = self.sentence2index(
-                    snt, word2indexDict, input_side=input_side)
-                sampleNum += len(indexList)
                 if input_side:
+                    indexList = self.inputsentence2index(
+                        snt, word2indexDict, input_side=input_side)
                     # input側 ここで長さ毎でまとめたリストを作成する
                     # 値は文番号と文そのもののペア
                     d[len(indexList)].append((sntNum, indexList))
+                    # sys.stdout.write('# {} {}\n'.format(
+                    #    sntNum, indexList))
                 else:
+                    indexList = self.sentence2index(
+                        snt, word2indexDict, input_side=input_side)
                     d[sntNum] = indexList  # decoder側 文の番号をキーとしたハッシュ
+                sampleNum += len(indexList)
+                unk_count += indexList.count(idx_unk)
+                bos_count += indexList.count(idx_bos)
+                eos_count += indexList.count(idx_eos)
                 sentenceNum += 1
                 maxLen = max(maxLen, len(indexList))
-        sys.stdout.write('# data sent: %10d  sample: %10d maxlen: %10d\n' % (
-            sentenceNum, sampleNum, maxLen))
+
+        sys.stdout.write(
+            '# data sent: %10d  sample: %10d maxlen: %10d '
+            '| unk_rate %.2f %10d/%10d '
+            '| #bos=%10d #eos=%10d\n' %
+            (sentenceNum,
+             sampleNum,
+             maxLen,
+             100.0 *
+             unk_count /
+             sampleNum,
+             unk_count,
+             sampleNum,
+             bos_count,
+             eos_count))
         return d
 
     def makeBatch4Train(self, encSentLenDict, decSentLenDict,
@@ -890,15 +1202,35 @@ class PrepareData:
         decSentBatch = []
         # shuffleなしの場合にencoderの長い方から順番に生成
         for batch in encSentDividedBatch[::-1]:
-            encSentBatch.append(
-                np.array([encSent for sntNum, encSent in batch],
-                         dtype=np.int32).T)
-            maxDecoderLength = max([len(decSentLenDict[sntNum])
-                                    for sntNum, encSent in batch])
-            decSentBatch.append(
-                np.array([decSentLenDict[sntNum] + [-1] *
-                          (maxDecoderLength - len(decSentLenDict[sntNum]))
-                          for sntNum, encSent in batch], dtype=np.int32).T)
+            # encSentBatch.append(
+            #    np.array([encSent for sntNum, encSent in batch],
+            #             dtype=np.int32).T)
+            maxEncFsize = max([len(encSent[0])  # 最初の単語のサイズがわかればよい
+                               for sntNum, encSent in batch])
+            t_encSent = [0] * len(batch)
+            i = 0
+            for sntNum, encSent in batch:
+                t_encSent[i] = [widxs + [-1] *
+                                (maxEncFsize - len(widxs))
+                                for widxs in encSent]
+                i = i + 1
+            encSentBatch.append(t_encSent)
+            # 全てのデータに対して要素数を比較してもっとも大きい値を取得
+            decSentTypeSize = len(decSentLenDict)
+            maxDecoderLength = max([len(decSentLenDict[z][sntNum])
+                                    for sntNum, encSent in batch
+                                    for z in six.moves.range(decSentTypeSize)])
+
+            t_decSentBatch = [0] * decSentTypeSize
+            for z in six.moves.range(decSentTypeSize):
+                t_decSentBatch[z] = np.array(
+                    [decSentLenDict[z][sntNum] + [-1] *
+                     (maxDecoderLength - len(decSentLenDict[z][sntNum]))
+                     for sntNum, encSent in batch], dtype=np.int32).T
+            # decSentBatchの構成は，axis=0が書くデータに相当するので，必ず第一軸でスライスして使う必要がある
+            decSentBatch.append(t_decSentBatch)
+
+            # TODO
         ######
         return list(six.moves.zip(encSentBatch, decSentBatch))
 
@@ -920,20 +1252,6 @@ class TrainProcInfo:
 
         self.encMaxLen = 0
         self.decMaxLen = 0
-
-    def update(self, loss_stat, mbs, bc, cor, incor, tsize, proc,
-               encLen, decLen):
-        self.instanceNum += mbs  # 文数を数える
-        self.batchCount += bc  # minibatchで何回処理したか
-        self.corTot += cor
-        self.incorTot += incor
-        self.trainsizeTot += tsize
-        self.procTot += proc
-        # 強制的にGPUからCPUに値を移すため floatを利用
-        self.lossVal += float(loss_stat)
-
-        self.encMaxLen = max(encLen * mbs, self.encMaxLen)
-        self.decMaxLen = max(decLen * mbs, self.decMaxLen)
 
     # 途中経過を標示するための情報取得するルーチン
     def print_strings(self, train_mode, epoch, cMBSize, encLen, decLen,
@@ -977,26 +1295,16 @@ def train_model_sub(train_mode, epoch, tData, EncDecAtt, optimizer,
         else:              # dev
             dropout_rate = 0
         #####################
-        if args.chainer_version_check[0] == 2:
-            if train_mode > 0:  # train
-                chainer.global_config.train = True
-                chainer.global_config.enable_backprop = True
-                sys.stderr.write(
-                    ('# TRAIN epoch {} drop rate={} | CHAINER CONFIG  [{}] \n'
-                     .format(epoch, dropout_rate,
-                             chainer.global_config.__dict__)))
-            else:              # dev
-                chainer.global_config.train = False
-                chainer.global_config.enable_backprop = False
-                sys.stderr.write(
-                    ('# DEV.  epoch {} drop rate={} | CHAINER CONFIG  [{}] \n'
-                     .format(epoch, dropout_rate,
-                             chainer.global_config.__dict__)))
-        else:
-            if train_mode > 0:  # train
-                args.dropout_mode = args.dropout_mode_orig
-            else:              # dev
-                args.dropout_mode = False
+        if train_mode > 0:  # train
+            sys.stderr.write(
+                ('# TRAIN epoch {} drop rate={} | CHAINER CONFIG  [{}] \n'
+                 .format(epoch, dropout_rate,
+                         chainer.global_config.__dict__)))
+        else:              # dev
+            sys.stderr.write(
+                ('# DEV.  epoch {} drop rate={} | CHAINER CONFIG  [{}] \n'
+                 .format(epoch, dropout_rate,
+                         chainer.global_config.__dict__)))
         #####################
         # メインループ
         for encSent, decSent in tData:
@@ -1014,7 +1322,7 @@ def train_model_sub(train_mode, epoch, tData, EncDecAtt, optimizer,
                 # mini batch のiサイズは毎回違うので取得
                 cMBSize = encInfo.cMBSize
                 encLen = len(encSent)
-                decLen = len(decSent)
+                decLen = len(decSent[0])  # 複数あるので
                 tInfo.instanceNum += cMBSize  # 文数を数える
                 tInfo.batchCount += 1  # minibatchで何回処理したか
                 tInfo.corTot += acc_stat[0]
@@ -1033,7 +1341,7 @@ def train_model_sub(train_mode, epoch, tData, EncDecAtt, optimizer,
                         # TODO 処理が重いので実行回数を減らす ロが不要ならいらない
                         xp = cuda.get_array_module(encInfo.lstmVars[0].data)
                         tInfo.pnorm = float(
-                            xp.sqrt(chainer.optimizer._sum_sqnorm(
+                            xp.sqrt(_sum_sqnorm(
                                 [p.data for p in optimizer.target.params()])))
                 ####################
                 del encInfo
@@ -1067,7 +1375,7 @@ def train_model_sub(train_mode, epoch, tData, EncDecAtt, optimizer,
                     if isinstance(e, cupy.cuda.runtime.CUDARuntimeError):
                         cMBSize = len(encSent[0])
                         encLen = len(encSent)
-                        decLen = len(decSent)
+                        decLen = len(decSent[0])
                         sys.stdout.write(
                             ('\r# GPU Memory Error? Skip! {} | enc={} dec={} '
                              'mbs={} total={} | {}\n'.format(
@@ -1145,8 +1453,16 @@ def train_model(args):
         prepD = PrepareData(EncDecAtt)
     else:
         prepD = PrepareData(args)
+        sys.stdout.write('# encVocab [%s] \n' % (args.encVocabFile))
         encoderVocab = prepD.readVocab(args.encVocabFile)
-        decoderVocab = prepD.readVocab(args.decVocabFile)
+        # decoderVocab = prepD.readVocab(args.decVocabFile)
+        decoderVocab = []
+        for i, fname in enumerate(args.decVocabFile.split(':')):
+            sys.stdout.write(
+                '# decVocab [%s] [%s] \n' %
+                (args.decVocabFile, fname))
+            decoderVocab.append(prepD.readVocab(fname))
+        #########
         EncDecAtt = EncoderDecoderAttention(encoderVocab, decoderVocab, args)
 
     if args.outputFile:
@@ -1175,14 +1491,39 @@ def train_model(args):
     else:  # 学習済みの初期モデルがなければパラメタを全初期化する
         EncDecAtt.setInitAllParameters(optimizer, init_type=args.init_type,
                                        init_scale=args.init_scale)
+        if args.init_emb_by_w2v_file:
+            EncDecAtt.readWord2vecResult(args.init_emb_by_w2v_file,
+                                         args.init_emb_by_w2v_mode)
+            sys.stdout.write("############ Current Parameters BEGIN\n")
+            EncDecAtt.printAllParameters(optimizer)
+            sys.stdout.write("############ Current Parameters END\n")
 
     ########################################
     # ここでencoder側/decoder側のデータを全て読み込む
     if True:
+        sys.stdout.write(
+            '# encTrainDataFile [{}] vocab=[{}]\n'
+            .format(args.encDataFile, len(EncDecAtt.encoderVocab)))
         encSentLenDict = prepD.makeSentenceLenDict(
             args.encDataFile, EncDecAtt.encoderVocab, input_side=True)
-        decSentLenDict = prepD.makeSentenceLenDict(
-            args.decDataFile, EncDecAtt.decoderVocab, input_side=False)
+        # dec側は複数のファイルがあることを仮定(一つでもよい)
+        sys.stdout.write(
+            '# decTrainDataFile [{}]\n'.format(args.decDataFile))
+        decDataFile = []
+        for z, fname in enumerate(args.decDataFile.split(':')):
+            sys.stdout.write(
+                '# decTrainDataFile [{}] [{}] vocab=[{}]\n'
+                .format(z, fname, len(EncDecAtt.decoderVocab[z])))
+            decDataFile.append(fname)
+        assert len(decDataFile) == len(EncDecAtt.decoderVocab)
+        decSentLenDict = [0] * len(decDataFile)
+        for z, fname in enumerate(decDataFile):
+            decSentLenDict[z] = prepD.makeSentenceLenDict(
+                fname, EncDecAtt.decoderVocab[z], input_side=False)
+        ##
+        # decSentLenDict = prepD.makeSentenceLenDict(
+        #     args.decDataFile, EncDecAtt.decoderVocab, input_side=False)
+        #####
         if args.mode_data_shuffle == 0:  # default
             trainData = prepD.makeBatch4Train(
                 encSentLenDict,
@@ -1190,10 +1531,29 @@ def train_model(args):
                 args.batch_size,
                 shuffle_flag=True)
     if args.encDevelDataFile and args.decDevelDataFile:
+        sys.stdout.write(
+            '# encDevelDataFile [{}] vocab=[{}]\n'
+            .format(args.encDevelDataFile, len(EncDecAtt.encoderVocab)))
         encSentLenDictDevel = prepD.makeSentenceLenDict(
             args.encDevelDataFile, EncDecAtt.encoderVocab, input_side=True)
-        decSentLenDictDevel = prepD.makeSentenceLenDict(
-            args.decDevelDataFile, EncDecAtt.decoderVocab, input_side=False)
+        # dec側は複数のファイルがあることを仮定(一つでもよい)
+        sys.stdout.write(
+            '# decDevelDataFile [{}]\n'.format(args.decDevelDataFile))
+        decDevelDataFile = []
+        for z, fname in enumerate(args.decDevelDataFile.split(':')):
+            sys.stdout.write(
+                '# decDevelDataFile [{}] [{}] vocab=[{}]\n'
+                .format(z, fname, len(EncDecAtt.decoderVocab[z])))
+            decDevelDataFile.append(fname)
+        assert len(decDevelDataFile) == len(EncDecAtt.decoderVocab)
+        decSentLenDictDevel = [0] * len(decDevelDataFile)
+        for z, fname in enumerate(decDevelDataFile):
+            decSentLenDictDevel[z] = prepD.makeSentenceLenDict(
+                fname, EncDecAtt.decoderVocab[z], input_side=False)
+        ##
+        # decSentLenDictDevel = prepD.makeSentenceLenDict(
+        #     args.decDevelDataFile, EncDecAtt.decoderVocab, input_side=False)
+        ######
         develData = prepD.makeBatch4Train(
             encSentLenDictDevel, decSentLenDictDevel, args.batch_size,
             shuffle_flag=False)
@@ -1202,11 +1562,14 @@ def train_model(args):
     prevAccDevel = 0
     prevLossTrain = 1.0e+100
     # 学習のループ
-    for epoch in six.moves.range(args.epoch):
+    for epoch in six.moves.range(args.epoch + 1):
         ####################################
         # devの評価モード
         if args.encDevelDataFile and args.decDevelDataFile:
             train_mode = 0
+            # dropout_rate = 0
+            chainer.global_config.train = False
+            chainer.global_config.enable_backprop = False
             begin = time.time()
             sys.stdout.write(
                 ('# Dev. data | total mini batch bucket size = {0}\n'.format(
@@ -1246,8 +1609,11 @@ def train_model(args):
         # 学習モード
         # shuffleしながらmini batchを全て作成する
         # epoch==0のときは長い順（メモリ足りない場合の対策 やらなくてもよい）
-        if True:  # 学習は必ず行うことが前提
+        if epoch < args.epoch:  # 学習は必ず行うことが前提
             train_mode = 1
+            # dropout_rate = args.dropout_rate
+            chainer.global_config.train = True
+            chainer.global_config.enable_backprop = True
             begin = time.time()
             if args.mode_data_shuffle == 0:  # default
                 # encLenの長さでまとめたものをシャッフルする
@@ -1266,6 +1632,9 @@ def train_model(args):
                 ('# Train | data shuffle | total mini batch bucket size = {0} '
                  '| Time: {1:10.4f}\n'.format(
                      len(trainData), time.time() - begin)))
+            # sys.stderr.write(
+            #   ('# TRAIN epoch {} drop rate={} | CHAINER CONFIG  [{}] \n'
+            #    .format(epoch, dropout_rate, chainer.global_config.__dict__)))
             # 学習の実体
             begin = time.time()
             tInfo = train_model_sub(train_mode, epoch, trainData, EncDecAtt,
@@ -1275,11 +1644,11 @@ def train_model(args):
             sys.stdout.write('\r# Train END %s | diff: %e\n' % (
                 msgA, dL / max(1, tInfo.instanceNum)))
             prevLossTrain = tInfo.lossVal
-        ####################################
-        # モデルの保存
-        if args.outputFile:
-            if (epoch + 1 == args.epoch or
-                    (args.outEach != 0 and (epoch + 1) % args.outEach == 0)):
+            ####################################
+            # モデルの保存
+            if (args.outputFile and
+                (epoch + 1 == args.epoch or
+                 (args.outEach != 0 and (epoch + 1) % args.outEach == 0))):
                 try:
                     outputFileName = args.outputFile + '.epoch%s' % (epoch + 1)
                     sys.stdout.write(
@@ -1304,13 +1673,26 @@ def train_model(args):
 
 ####################################
 # 以下，評価時だけ使う関数
-def updateBeamThreshold__2(queue, input):
+def updateBeamThreshold__2(queue, input, max_queue_size=-1):
     # list内の要素はlist,タプル，かつ，0番目の要素はスコアを仮定
+    queue_size = len(queue)
+    # sys.stderr.write('### QUEUE {} {} | {} {}\n'.format(
+    #    len(queue), max_queue_size,  queue[-1][0], input[0]))
     if len(queue) == 0:
         queue.append(input)
+    elif max_queue_size > 0 and queue_size < max_queue_size:
+        for i in six.moves.range(queue_size):
+            if queue[i][0] <= input[0]:
+                continue
+            tmp = queue[i]
+            queue[i] = input
+            input = tmp
+        queue.append(input)
+        # sys.stderr.write('### QUEUE APPEND {} {} | {} {}\n'.format(
+        #    len(queue), max_queue_size,  queue[-1][0], input[0]))
     else:
         # TODO 線形探索なのは面倒なので 効率を上げるためには要修正
-        for i in six.moves.range(len(queue)):
+        for i in six.moves.range(queue_size):
             if queue[i][0] <= input[0]:
                 continue
             tmp = queue[i]
@@ -1319,91 +1701,153 @@ def updateBeamThreshold__2(queue, input):
     return queue
 
 
-def decodeByBeamFast(EncDecAtt, encSent, cMBSize, max_length, beam_size, args):
+def decodeByBeamFast(
+        EncDecAttModels,
+        encSent,
+        max_length,
+        beam_size,
+        args,
+        fil_a,
+        fil_b,
+        fil_c):
     train_mode = 0  # 評価なので
-    encInfo = EncDecAtt.encodeSentenceFWD(train_mode, encSent, args, 0.0)
-    if args.gpu_enc != args.gpu_dec:  # encとdecが別GPUの場合
-        chainer.cuda.get_device(args.gpu_dec).use()
-    encLen = encInfo.encLen
-    aList, finalHS = EncDecAtt.prepareDecoder(encInfo)
+    encInfo = [0] * len(EncDecAttModels)
+    aList = [0] * len(EncDecAttModels)
+    prevOutIn = [0] * len(EncDecAttModels)
 
-    idx_bos = EncDecAtt.decoderVocab['<s>']
-    idx_eos = EncDecAtt.decoderVocab['</s>']
-    idx_unk = EncDecAtt.decoderVocab['<unk>']
+    for i, EncDecAtt in enumerate(EncDecAttModels):
+        encInfo[i] = EncDecAtt.encodeSentenceFWD(
+            train_mode, encSent, args, 0.0)
+        if args.gpu_enc != args.gpu_dec:  # encとdecが別GPUの場合
+            chainer.cuda.get_device(args.gpu_dec).use()  # dec側のgpuで処理をするため
+        aList[i], prevOutIn[i] = EncDecAtt.prepareDecoder(encInfo[i])
+    encLen = encInfo[0].encLen
 
+    idx_bos = EncDecAttModels[0].decoderVocab[0]['<s>']
+    idx_eos = EncDecAttModels[0].decoderVocab[0]['</s>']
+    idx_unk = EncDecAttModels[0].decoderVocab[0]['<unk>']
+
+    xp = cuda.get_array_module(encInfo[0].lstmVars[0].data)
     if args.wo_rep_w:
-        WFilter = xp.zeros((1, EncDecAtt.decVocabSize), dtype=xp.float32)
+        WFilter = xp.zeros(
+            (1, EncDecAttModels[0].decVocabSize[0]), dtype=xp.float32)
     else:
         WFilter = None
-    beam = [(0, [idx_bos], idx_bos, encInfo.lstmVars, finalHS, WFilter)]
-    dummy_b = (1.0e+100, [idx_bos], idx_bos, None, None, WFilter)
+
+    type_counter = xp.zeros((1, 2), dtype=xp.int32)
+    type_counter[0][1] = encLen
+
+    beam = [(0, [idx_bos], idx_bos, [x.lstmVars for x in encInfo],
+             prevOutIn, WFilter, type_counter)]
+    dummy_b = (1.0e+999, [idx_bos], idx_bos, None, None, WFilter, type_counter)
 
     for i in six.moves.range(max_length + 1):  # for </s>
-        newBeam = [dummy_b] * beam_size
+        # newBeam = [dummy_b]*beam_size
+        newBeam = [dummy_b] * 1  # for small output size
 
         cMBSize = len(beam)
-        #######################################################################
-        # beamで分割されているものを一括処理するために miniBatchとみなして処理
-        # 準備としてbeamの情報を結合
-        # beam内の候補をminibatchとして扱うために，axis=0 を 1から
-        # cMBSizeに拡張するためにbroadcast
-        biH0 = chaFunc.broadcast_to(
-            encInfo.attnList, (cMBSize, encLen, EncDecAtt.hDim))
-        if EncDecAtt.attn_mode == 1:
-            aList_a = biH0
-        elif EncDecAtt.attn_mode == 2:
-            t = chaFunc.broadcast_to(
-                chaFunc.reshape(
-                    aList, (1, encLen, EncDecAtt.hDim)),
-                (cMBSize, encLen, EncDecAtt.hDim))
-            aList_a = chaFunc.reshape(t, (cMBSize * encLen, EncDecAtt.hDim))
-            # TODO: 効率が悪いのでencoder側に移動したい
-        else:
-            assert 0, "ERROR"
 
-        zipbeam = list(six.moves.zip(*beam))
-        # axis=1 (defaultなので不要) ==> hstack
-        lstm_states_a = chaFunc.concat(zipbeam[3])
-        # concat(a, axis=0) == vstack(a)
-        finalHS_a = chaFunc.concat(zipbeam[4], axis=0)
-        # decoder側の単語を取得
-        # 一つ前の予測結果から単語を取得
-        wordIndex = np.array(zipbeam[2], dtype=np.int32)
-        inputEmbList = EncDecAtt.getDecoderInputEmbeddings(wordIndex, args)
-        #######################################################################
-        hOut, lstm_states_a = EncDecAtt.processDecLSTMOneStep(
-            inputEmbList, lstm_states_a, finalHS_a, args, 0.0)
-        # attentionありの場合 contextベクトルを計算
-        next_h4_a = EncDecAtt.calcAttention(hOut, biH0, aList_a,
-                                            encLen, cMBSize, args)
-        oVector_a = EncDecAtt.generateWord(next_h4_a, encLen,
-                                           cMBSize, args, 0.0)
-        #####
-        nextWordProb_a = -chaFunc.log_softmax(oVector_a.data).data
+        nextWordProb_a = xp.zeros(
+            (cMBSize, EncDecAttModels[0].decVocabSize[0]), dtype=xp.float32)
+        epsilon_a = xp.ones(
+            (cMBSize,
+             EncDecAttModels[0].decVocabSize[0]),
+            dtype=xp.float32) * 0.000001
+        lstm_states_a_list = [0] * len(EncDecAttModels)
+        next_h4_a_list = [0] * len(EncDecAttModels)
+        for j, EncDecAtt in enumerate(EncDecAttModels):
+            ###################################################################
+            # beamで分割されているものを一括処理するために miniBatchとみなして処理 準備としてbeamの情報を結合
+            # beam内の候補をminibatchとして扱うために，axis=0 を 1から cMBSizeに拡張するためにbroadcast
+            biH0 = chaFunc.broadcast_to(
+                encInfo[j].attnList, (cMBSize, encLen, EncDecAtt.hDim))
+            if EncDecAtt.attn_mode == 1:
+                aList_a = biH0
+            elif EncDecAtt.attn_mode == 2:
+                t = chaFunc.broadcast_to(
+                    chaFunc.reshape(
+                        aList[j], (1, encLen, EncDecAtt.hDim)),
+                    (cMBSize, encLen, EncDecAtt.hDim))
+                aList_a = chaFunc.reshape(
+                    t, (cMBSize * encLen, EncDecAtt.hDim))
+                # TODO: 効率が悪いのでencoder側に移動したい
+            else:
+                assert 0, "ERROR"
+
+            # axis=1 (defaultなので不要)= hstack
+            lstm_states_a = chaFunc.concat([x[3][j] for x in beam])
+            # concat(a, axis=0) == vstack(a)
+            prevOutIn_a = chaFunc.concat([x[4][j] for x in beam], axis=0)
+            # decoder側の単語を取得
+            wordIndex = np.array([x[2] for x in beam],
+                                 dtype=np.int32)  # 一つ前の予測結果から単語を取得
+            inputEmbList = EncDecAtt.model.decOutputL.getInputEmbeddings(
+                wordIndex, 0, args)
+            ###################################################################
+            ##
+            hOut, lstm_states_a = EncDecAtt.processDecLSTMOneStep(
+                inputEmbList, lstm_states_a, prevOutIn_a, args, 0.0)
+            next_h4_a = EncDecAtt.calcAttention(hOut, biH0, aList_a,
+                                                encLen, cMBSize, args)
+            lstm_states_a_list[j] = lstm_states_a
+            next_h4_a_list[j] = next_h4_a
+            nextWordProb_a += EncDecAtt.model.decOutputL.getProbSingle2(
+                0, [next_h4_a], cMBSize, args)  # TODO
+
+            # oVector_a = EncDecAtt.generateWord(next_h4_a_list[j],
+            #                                    encLen, cMBSize, args, 0.0)
+        ###################
+        nextWordProb_a /= len(EncDecAttModels)
+        nextWordProb_a = - chaFunc.clip(
+            chaFunc.log(nextWordProb_a + epsilon_a), -1.0e+99, 0.0).data
+        # ここでlogにしているので，これ以降は nextWordProb_a
+        # は大きい値ほど選択されないと言う意味
+
+        ######
         if args.wo_rep_w:
-            WFilter_a = xp.concat(zipbeam[4], axis=0)
+            WFilter_a = xp.concatenate([x[5] for x in beam], axis=0)
             nextWordProb_a += WFilter_a
-        # 絶対に出てほしくない出力を強制的に選択できないようにするために
-        # 大きな値をセットする
-        nextWordProb_a[:, idx_bos] = 1.0e+100  # BOS
+        # 絶対に出てほしくない出力を強制的に選択できないようにするために大きな値をセットする
+        if args.use_bos:  # BOSは出さない設定の場合
+            if i != 0:  # EOSは文の先頭だけ許可（逆に言うと，文の先頭以外は不許可）
+                nextWordProb_a[:, idx_bos] = 1.0e+100
+        else:
+            nextWordProb_a[:, idx_bos] = 1.0e+100  # BOS
         if args.wo_unk:  # UNKは出さない設定の場合
             nextWordProb_a[:, idx_unk] = 1.0e+100
+
+        #############################
+        if args.use_restrict_decoding:
+            for z, b in enumerate(beam):
+                t_type_counter = b[6]
+                if t_type_counter[0][1] == 0:  # XXを使い切った => XXと開き括弧の禁止
+                    nextWordProb_a[z] = nextWordProb_a[z] + \
+                        (fil_a + fil_b) * 1.0e+100  # 1.0e+100
+                else:
+                    nextWordProb_a[z, idx_eos] = 1.0e+100
+                if t_type_counter[0][0] == 0:  # 開き閉じ括弧の数が同じ => 閉じ括弧の禁止
+                    nextWordProb_a[z] = nextWordProb_a[z] + \
+                        fil_c * 1.0e+100  # 1.0e+100
+                else:
+                    nextWordProb_a[z, idx_eos] = 1.0e+100
+        #############################
 
         #######################################################################
         # beam_size個だけ使う，使いたくない要素は上の値変更処理で事前に省く
         if args.gpu_enc >= 0:
             nextWordProb_a = nextWordProb_a.get()  # sort のためにCPU側に移動
-        sortedIndex_a = bn.argpartition(
-            nextWordProb_a, beam_size)[:, :beam_size]
-        # 遅くてもbottleneckを使いたくなければ下を使う？
-        # sortedIndex_a = np.argsort(nextWordProb_a)[:, :beam_size]
+        if beam_size >= nextWordProb_a.shape[-1]:  # argpartitionは最後の要素をならべかえる
+            sortedIndex_a = bn.argpartition(
+                nextWordProb_a, nextWordProb_a.shape[-1] - 1)
+        else:
+            sortedIndex_a = bn.argpartition(
+                nextWordProb_a, beam_size)[:, :beam_size]
         #######################################################################
 
         for z, b in enumerate(beam):
-            # まず，EOSまで既に到達している場合はなにもしなくてよい
-            # (beamはソートされていることが条件)
+            # まず，EOSまで既に到達している場合はなにもしなくてよい (beamはソートされていることが条件)
             if b[2] == idx_eos:
-                newBeam = updateBeamThreshold__2(newBeam, b)
+                newBeam = updateBeamThreshold__2(newBeam, b, beam_size + 1)
                 continue
             ##
             flag_force_eval = False
@@ -1414,8 +1858,8 @@ def decodeByBeamFast(EncDecAtt, encSent, cMBSize, max_length, beam_size, args):
                 continue
             # 3
             # 次のbeamを作るために準備
-            lstm_states = lstm_states_a[:, z:z + 1, ]
-            next_h4 = next_h4_a[z:z + 1, ]
+            lstm_states = [x[:, z:z + 1, ] for x in lstm_states_a_list]
+            next_h4 = [x[z:z + 1, ] for x in next_h4_a_list]
             nextWordProb = nextWordProb_a[z]
             ###################################
             # 長さ制約的にEOSを選ばなくてはいけないという場合
@@ -1427,24 +1871,18 @@ def decodeByBeamFast(EncDecAtt, encSent, cMBSize, max_length, beam_size, args):
                     tWFilter[:, wordIndex] += 1.0e+100
                 else:
                     tWFilter = b[5]
-                nb = (newProb, b[1][:] + [wordIndex], wordIndex,
-                      lstm_states, next_h4, tWFilter)
-                newBeam = updateBeamThreshold__2(newBeam, nb)
+                t_type_counter = b[6].copy()
+                nb = (
+                    newProb,
+                    b[1][:] +
+                    [wordIndex],
+                    wordIndex,
+                    lstm_states,
+                    next_h4,
+                    tWFilter,
+                    t_type_counter)
+                newBeam = updateBeamThreshold__2(newBeam, nb, beam_size + 1)
                 continue
-            # 正解が与えられている際にはこちらを使う
-            # if decoderSent is not None:
-            #   wordIndex = decoderSent[i]
-            #   newProb =  nextWordProb[wordIndex] + b[0]
-            #   if args.wo_rep_w:
-            #           tWFilter = b[5].copy()
-            #           tWFilter[:,wordIndex] += 1.0e+100
-            #   else:
-            #                tWFilter = b[5]
-            #   nb = (newProb, b[1][:]+[wordIndex], wordIndex,
-            #         lstm_states, next_h4, tWFilter)
-            #   newBeam = updateBeamThreshold__2(newBeam, nb)
-            #   continue
-            # 3
             # ここまでたどり着いたら最大beam個評価する
             # 基本的に sortedIndex_a[z] は len(beam) 個しかない
             for wordIndex in sortedIndex_a[z]:
@@ -1458,20 +1896,46 @@ def decodeByBeamFast(EncDecAtt, encSent, cMBSize, max_length, beam_size, args):
                     tWFilter[:, wordIndex] += 1.0e+100
                 else:
                     tWFilter = b[5]
-                nb = (newProb, b[1][:] + [wordIndex], wordIndex,
-                      lstm_states, next_h4, tWFilter)
-                newBeam = updateBeamThreshold__2(newBeam, nb)
+
+                #########################
+                t_type_counter = b[6].copy()
+                if args.use_restrict_decoding:
+                    if wordIndex != 0:
+                        tw = EncDecAttModels[0].index2decoderWord[0][wordIndex]
+                    else:
+                        tw = "_XX_"
+                    if tw == ',' or tw == '.' or tw == '``' or \
+                        tw == '\'\'' or tw == ':' or tw == 'XX' or tw[
+                            0] == '_':
+                        t_type_counter[0][1] -= 1
+                    elif tw[0] == '(':
+                        t_type_counter[0][0] += 1
+                    elif tw[0] == ')':
+                        t_type_counter[0][0] -= 1
+                    else:
+                        pass
+                #########################
+                nb = (
+                    newProb,
+                    b[1][:] +
+                    [wordIndex],
+                    wordIndex,
+                    lstm_states,
+                    next_h4,
+                    tWFilter,
+                    t_type_counter)
+                newBeam = updateBeamThreshold__2(newBeam, nb, beam_size + 1)
                 #####
         ################
         # 一時刻分の処理が終わったら，入れ替える
-        beam = newBeam
+        beam = newBeam[0:-1]  # the last element can be dummy
+        # beam = newBeam
         if all([True if b[2] == idx_eos else False for b in beam]):
             break
         # 次の入力へ
-    beam = [(b[0], b[1], b[3], b[4], [EncDecAtt.index2decoderWord[z]
-                                      if z != 0
-                                      else "$UNK$"
-                                      for z in b[1]]) for b in beam]
+    # for PTBParsing
+    beam = [(b[0], b[1], b[3], b[6], [EncDecAttModels[0].index2decoderWord[0][
+             z] if z != 0 else "XX" for z in b[1]]) for b in beam]
 
     return beam
 
@@ -1481,19 +1945,61 @@ def rerankingByLengthNormalizedLoss(beam, wposi):
     return beam
 
 
+def decodeByBeamFast2OneBest(
+        EncDecAttModels,
+        encSent,
+        decMaxLen,
+        beam_size,
+        args,
+        fil_a,
+        fil_b,
+        fil_c):
+    outputBeam = decodeByBeamFast(
+        EncDecAttModels,
+        encSent,
+        decMaxLen,
+        beam_size,
+        args,
+        fil_a,
+        fil_b,
+        fil_c)
+    wposi = 4
+    # outloop = 1
+
+    # 長さに基づく正規化 このオプションを使うことを推奨
+    if args.length_normalized:
+        outputBeam = rerankingByLengthNormalizedLoss(outputBeam, wposi)
+
+    if args.output_all_beam > 0:
+        # outloop = args.beam_size
+        sys.stdout.write('{}\n'.format(len(outputBeam)))
+
+    outputList = outputBeam[0][wposi]
+    if outputList[-1] != '</s>':
+        outputList.append('</s>')
+    out_text = ' '.join(outputList[1:len(outputList) - 1])
+    return out_text
+
+
 # テスト部本体
 def ttest_model(args):
+    # init_modelがスペース区切りで複数与えられているときは、ensembleする
+    model_files = args.init_model_file.split(':')
+    EncDecAttModels = [0] * len(model_files)
 
-    EncDecAtt = pickle.load(open(args.setting_file, 'rb'))
-    EncDecAtt.initModel()
-    if args.setting_file and args.init_model_file:  # モデルをここで読み込む
-        sys.stderr.write('Load model from: [%s]\n' % (args.init_model_file))
-        chaSerial.load_npz(args.init_model_file, EncDecAtt.model)
-    else:
-        assert 0, "ERROR"
-    prepD = PrepareData(EncDecAtt)
+    for i, model_file in enumerate(model_files):
+        EncDecAtt = pickle.load(open(args.setting_file, 'rb'))
+        EncDecAtt.initModel()
+        if args.setting_file and model_file:  # モデルをここで読み込む
+            sys.stderr.write('Load model from: [%s]\n' % (model_file))
+            chaSerial.load_npz(model_file, EncDecAtt.model)
+        else:
+            assert 0, "ERROR"
+        EncDecAtt.setToGPUs(args)
+        EncDecAttModels[i] = EncDecAtt
+    prepD = PrepareData(EncDecAttModels[0])
+    EncDecAtt = None  # 念のため
 
-    EncDecAtt.setToGPUs(args)
     sys.stderr.write('Finished loading model\n')
 
     sys.stderr.write('max_length is [%d]\n' % args.max_length)
@@ -1506,6 +2012,47 @@ def ttest_model(args):
     ####################################
     decMaxLen = args.max_length
 
+    ####################################
+    fil_a = xp.zeros(
+        (len(
+            EncDecAttModels[0].index2decoderWord[0],
+        )),
+        dtype=xp.int32)
+    fil_b = xp.zeros(
+        (len(
+            EncDecAttModels[0].index2decoderWord[0],
+        )),
+        dtype=xp.int32)
+    fil_c = xp.zeros(
+        (len(
+            EncDecAttModels[0].index2decoderWord[0],
+        )),
+        dtype=xp.int32)
+
+    ####################################
+    if args.use_restrict_decoding:
+        sys.stderr.write(
+            '### vocab {} | {}\n'.format(
+                type(
+                    EncDecAttModels[0].index2decoderWord[0]),
+                EncDecAttModels[0].index2decoderWord[0]))
+        for i, tw in EncDecAttModels[0].index2decoderWord[0].items():
+            sys.stderr.write('### vocab {} => {}\n'.format(i, tw))
+            if tw == ',' or tw == '.' or tw == '``' or \
+               tw == '\'\'' or tw == ':' or tw == 'XX' or tw[0] == '_':
+                fil_a[i] = 1
+            elif tw[0] == '(':
+                fil_b[i] = 1
+            elif tw[0] == ')':
+                fil_c[i] = 1
+            else:
+                pass
+        sys.stderr.write('### fil_a {} {}\n'.format(fil_a.shape, fil_a))
+        sys.stderr.write('### fil_b {} {}\n'.format(fil_b.shape, fil_b))
+        sys.stderr.write('### fil_c {} {}\n'.format(fil_c.shape, fil_c))
+        sys.stderr.write('### total {}\n'.format(fil_a + fil_b + fil_c))
+    ####################################
+
     begin = time.time()
     counter = 0
     # TODO: codecsでないとエラーが出る環境がある？ 要調査 不要ならioにしたい
@@ -1514,25 +2061,33 @@ def ttest_model(args):
         for sentence in f:
             sentence = sentence.strip()  # stripを忘れずに．．．
             # ここでは，入力された順番で一文ずつ処理する方式のみをサポート
-            sourceSentence = prepD.sentence2index(
-                sentence, EncDecAtt.encoderVocab, input_side=True)
-            sourceSentence = np.transpose(
-                np.reshape(np.array(sourceSentence, dtype=np.int32),
-                           (1, len(sourceSentence))))
+            sourceSentence = prepD.inputsentence2index(
+                sentence, EncDecAttModels[0].encoderVocab, input_side=True)
+            sourceSentence = [sourceSentence, ]  # minibatch化と同じ意味
             # 1文ずつ処理するので，test時は基本必ずminibatch=1になる
-            cMBSize = len(sourceSentence[0])
-            outputBeam = decodeByBeamFast(EncDecAtt, sourceSentence, cMBSize,
-                                          decMaxLen, args.beam_size, args)
+            outputBeam = decodeByBeamFast(
+                EncDecAttModels,
+                sourceSentence,
+                decMaxLen,
+                args.beam_size,
+                args,
+                fil_a,
+                fil_b,
+                fil_c)
             wposi = 4
             outloop = 1
-            # if args.outputAllBeam > 0:
-            #    outloop = args.beam_size
 
             # 長さに基づく正規化 このオプションを使うことを推奨
             if args.length_normalized:
                 outputBeam = rerankingByLengthNormalizedLoss(outputBeam, wposi)
 
+            if args.output_all_beam > 0:
+                outloop = args.beam_size
+                sys.stdout.write('{}\n'.format(len(outputBeam)))
+
             for i in six.moves.range(outloop):
+                if i >= len(outputBeam):
+                    break
                 outputList = outputBeam[i][wposi]
                 # score = outputBeam[i][0]
                 if outputList[-1] != '</s>':
@@ -1547,16 +2102,19 @@ def ttest_model(args):
                 # 文末の空白はカウントしないので-1
                 # outputList[1:len(outputList) - 1] ])-1
             counter += 1
-            sys.stderr.write('\rSent.Num: %5d %s  | words=%d | Time: %10.4f ' %
-                             (counter, outputList, len(outputList),
+            sys.stderr.write('\nSent.Num: %5d %s | cand=%d | Time: %10.4f ' %
+                             (counter, outputBeam[0][wposi], len(outputBeam),
                               time.time() - begin))
-    sys.stderr.write('\rDONE: %5d | Time: %10.4f\n' %
+            if args.use_restrict_decoding:
+                if outputBeam[0][3][0][0] != 0 or outputBeam[0][3][0][1] != 0:
+                    sys.stderr.write(
+                        ' ### WARNING ### ||| {} '.format(
+                            outputBeam[0][3]))
+    sys.stderr.write('\nDONE: %5d | Time: %10.4f\n' %
                      (counter, time.time() - begin))
 
 
-#######################################
-# ## main関数
-if __name__ == "__main__":
+def parse_options_encdecattn():
     parser = argparse.ArgumentParser()
     parser.add_argument(
         '--gpu-enc',
@@ -1788,12 +2346,6 @@ if __name__ == "__main__":
         type=int,
         help=('shuffle data mode [int] default=0 '
               '(only minibatch bucket shuffle) option=1 (shuffle all data)'))
-    # parser.add_argument(
-    #     '--use-blank-token',
-    #     dest='use_blank_token',
-    #     default=0,
-    #     type=int,
-    #     help='use blank token for padding [int] default=0')
 
     # decoder options for test
     parser.add_argument(
@@ -1803,6 +2355,14 @@ if __name__ == "__main__":
         type=int,
         help=('[decoder option] '
               'the maximum number of words in output'))
+    parser.add_argument(
+        '--use-bos',
+        dest='use_bos',
+        default=False,
+        action='store_true',
+        help=('[decoder option] '
+              'with or without using UNK tokens in output [bool] '
+              'default=False'))
     parser.add_argument(
         '--without-unk',
         dest='wo_unk',
@@ -1841,33 +2401,73 @@ if __name__ == "__main__":
         type=int,
         help='random seed [int] default=2723')
 
-    # for debug
-    # parser.add_argument(
-    #    '--outputAllBeam',
-    #    dest='outputAllBeam',
-    #    default=0,
-    #    type=int,
-    #    help='output all candidates in beam')
-    # additional options for evaluation
-    # parser.add_argument(
-    #     '--print-attention',
-    #     dest='printAttention',
-    #     default=0,
-    #     type=int,
-    #     help='specify whether to print the prob. of attention or not')
+    parser.add_argument(
+        '--output-layer-type',
+        dest='output_layer_type',
+        default=0,
+        type=int,
+        help=('shuffle data mode [int] default=0 '
+              '(only minibatch bucket shuffle) option=1 (shuffle all data)'))
+
+    parser.add_argument(
+        '--init-emb-by-w2v-file',
+        dest='init_emb_by_w2v_file',
+        default='',
+        help='specify the name of file representing vector for initialization')
+
+    parser.add_argument(
+        '--init-emb-by-w2v-mode',
+        dest='init_emb_by_w2v_mode',
+        default=0,
+        type=int,
+        help='specify the mode of representing vector for initialization')
+
+    parser.add_argument(
+        '--output-all-beam',
+        dest='output_all_beam',
+        default=0,
+        type=int,
+        help='output all candidates in beam')
+
+    parser.add_argument(
+        '--dec-emb-tying',
+        dest='decEmbTying',
+        default=False,
+        action='store_true',
+        help=(
+            'share parameters between decoder embedding '
+            'and output layer [bool] '
+            'default=False'))
+
+    parser.add_argument(
+        '--use-restrict-decoding',
+        dest='use_restrict_decoding',
+        default=False,
+        action='store_true',
+        help=('restrict decoding [bool] '
+              'default=False'))
+
+    args = parser.parse_args()
+    return args
+
+
+#######################################
+# ## main関数
+if __name__ == "__main__":
 
     ##################################################################
+    # コマンドラインオプション取得
+    args = parse_options_encdecattn()
+
     # ここから開始
     sys.stderr.write('CHAINER VERSION [{}] \n'.format(chainer.__version__))
-    # コマンドラインオプション取得
-    args = parser.parse_args()
-    # chainer version2対応のためにバージョン取得
+    # python 3.5以降 ＋ chainer version2以降のみサポート
     args.chainer_version_check = [int(z)
                                   for z in chainer.__version__.split('.')[:2]]
-    if args.chainer_version_check[0] < 1 or args.chainer_version_check[0] > 2:
-        assert 0, "ERROR"
     sys.stderr.write('CHAINER VERSION check [{}]\n'.format(
         args.chainer_version_check))
+    if args.chainer_version_check[0] < 2 or sys.version_info < (3, 5):
+        assert 0, "ERROR: not supported version for this code"
     # sys.stderr.write(
     #     'CHAINER CONFIG  [{}] \n'.format(chainer.global_config.__dict__))
     # プライマリのGPUをセット 或いはGPUを使わない設定にする
@@ -1875,6 +2475,9 @@ if __name__ == "__main__":
         import cupy as xp
         cuda.check_cuda_available()
         cuda.get_device(args.gpu_enc).use()
+        sys.stderr.write('CUPY VERSION [{}]\n'.format(xp.__version__))
+        # cudnn = cuda.cudnn
+        # libcudnn = cuda.cudnn.cudnn
         sys.stderr.write(
             'w/  using GPU [%d] [%d] \n' %
             (args.gpu_enc, args.gpu_dec))
@@ -1890,34 +2493,25 @@ if __name__ == "__main__":
     random.seed(args.seed)
     # 学習か評価か分岐
     if args.train_mode == 'train':
-        if args.chainer_version_check[0] == 2:
-            chainer.global_config.train = True
-            chainer.global_config.enable_backprop = True
-            chainer.global_config.use_cudnn = "always"
-            chainer.global_config.type_check = True
-            sys.stderr.write(
-                'CHAINER CONFIG  [{}] \n'.format(
-                    chainer.global_config.__dict__))
-        else:
-            args.dropout_mode_orig = True
-            args.dropout_mode = True
+        chainer.global_config.train = True
+        chainer.global_config.enable_backprop = True
+        chainer.global_config.use_cudnn = "always"
+        chainer.global_config.type_check = True
+        sys.stderr.write(
+            'CHAINER CONFIG  [{}] \n'.format(
+                chainer.global_config.__dict__))
         if args.dropout_rate >= 1.0 or args.dropout_rate < 0.0:
             assert 0, "ERROR"
         train_model(args)
     elif args.train_mode == 'test':
-        if args.chainer_version_check[0] == 2:
-            chainer.global_config.train = False
-            chainer.global_config.enable_backprop = False
-            chainer.global_config.use_cudnn = "always"
-            chainer.global_config.type_check = True
-            args.dropout_rate = 0.0
-            sys.stderr.write(
-                'CHAINER CONFIG  [{}] \n'.format(
-                    chainer.global_config.__dict__))
-        else:
-            args.dropout_mode_orig = False
-            args.dropout_mode = False
-            args.dropout_rate = 0.0
+        chainer.global_config.train = False
+        chainer.global_config.enable_backprop = False
+        chainer.global_config.use_cudnn = "always"
+        chainer.global_config.type_check = True
+        args.dropout_rate = 0.0
+        sys.stderr.write(
+            'CHAINER CONFIG  [{}] \n'.format(
+                chainer.global_config.__dict__))
         ttest_model(args)
     else:
         sys.stderr.write('Please specify train or test\n')
